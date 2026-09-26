@@ -10,7 +10,6 @@ import { planAttachmentOwnershipTransfers } from '@shared/session-attachment-rag
 import type { Message } from '@shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { rendererApplication } from '@/app/renderer-application'
-import { supportsSessionAttachmentRag } from '@shared/platform'
 import platform from '@/platform'
 import { guardSessionAction } from './action-guard'
 
@@ -169,7 +168,7 @@ export async function deleteFork(sessionId: string, forkMessageId: string) {
 }
 
 async function reassignSharedAttachmentOwnership(sessionId: string, removed: Message[], survivors: Message[]) {
-  if (!supportsSessionAttachmentRag(platform.type) || removed.length === 0) {
+  if (!(platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) || removed.length === 0) {
     return
   }
   try {

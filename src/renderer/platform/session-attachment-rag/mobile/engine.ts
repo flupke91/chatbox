@@ -42,17 +42,36 @@ export function extractQueryKeywords(query: string): string[] {
     }
   }
 
-  const words = query
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .split(/\s+/)
-    .map((w) => w.trim())
-    .filter((w) => w.length >= 2)
+  // 1. English / Latin alphanumeric tokens
+  const latinWords = query.match(/[a-zA-Z0-9_-]{2,}/g)
+  if (latinWords) {
+    terms.push(...latinWords)
+  }
 
-  terms.push(...words)
+  // 2. CJK word segmentation using Intl.Segmenter (native in modern WebViews & Node.js)
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    try {
+      const segmenter = new (Intl as any).Segmenter('zh-CN', { granularity: 'word' })
+      for (const { segment, isWordLike } of segmenter.segment(query)) {
+        const clean = segment.trim()
+        if (isWordLike && clean.length >= 2 && clean.length <= 10) {
+          terms.push(clean)
+        }
+      }
+    } catch {
+      // Fallback below
+    }
+  }
 
+  // 3. CJK 2-3 char n-grams for recall resilience
   const cjkChars = query.replace(/[^\u4e00-\u9fa5]/g, '')
-  if (cjkChars.length >= 2 && cjkChars.length <= 15) {
-    terms.push(cjkChars)
+  if (cjkChars.length >= 2) {
+    for (let i = 0; i <= cjkChars.length - 2; i++) {
+      terms.push(cjkChars.slice(i, i + 2))
+      if (i <= cjkChars.length - 3) {
+        terms.push(cjkChars.slice(i, i + 3))
+      }
+    }
   }
 
   return [...new Set(terms)].filter(Boolean)
@@ -200,13 +219,14 @@ export class MobileLocalRagEngine {
     params: SessionAttachmentRagMaintenanceScope
   ): Promise<SessionAttachmentRagMaintenanceResult> {
     await this.initialize()
+    const interruptedFailedCount = await this.database.cleanupInterruptedIndexingAttachments()
     const orphanDeletedIds = await this.database.cleanupOrphans(
       params.sessionIds ?? [],
       params.messageIds ?? [],
       params.attachmentReferences ?? []
     )
     return {
-      interruptedFailedCount: 0,
+      interruptedFailedCount,
       canceledPurgedCount: 0,
       orphanDeletedIds,
     }
@@ -278,7 +298,7 @@ export class MobileLocalRagEngine {
     const scoredCandidates = chunks
       .map((chunk) => {
         const rawVectorScore = vectorHitMap.get(chunk.id) ?? 0
-        const sVec = Math.max(0, Math.min(1, (rawVectorScore + 1) / 2))
+        const sVec = Math.max(0, Math.min(1, rawVectorScore))
         const sKw = keywordHitMap.get(chunk.id) ?? 0
 
         let sEntity = 0
@@ -317,13 +337,11 @@ export class MobileLocalRagEngine {
         }
 
         // Hybrid fusion:
-        // Dynamically blend vector similarity and keyword overlap so fuzzy semantic
+        // Combine vector similarity and keyword overlap so fuzzy semantic
         // matches aren't penalized when keywords are absent, and dual matches reinforce.
-        let baseScore = 0
+        let baseScore = Math.max(sVec, sKw)
         if (sVec > 0 && sKw > 0) {
-          baseScore = Math.max(sVec, sKw) * 0.7 + Math.min(sVec, sKw) * 0.3
-        } else {
-          baseScore = Math.max(sVec, sKw)
+          baseScore += 0.15 * Math.min(sVec, sKw)
         }
 
         if (sEntity > 0) {

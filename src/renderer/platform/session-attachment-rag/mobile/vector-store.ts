@@ -78,28 +78,52 @@ export class SQLiteBlobVectorStore implements LocalVectorStore {
     await this.database.initialize()
     const placeholders = params.attachmentIds.map(() => '?').join(',')
     const db = this.database.getDatabase()
-    const result = await db.query(
-      `SELECT chunk_id, attachment_id, vector FROM session_attachment_vector WHERE attachment_id IN (${placeholders})`,
-      params.attachmentIds
-    )
-    const rows = result.values ?? []
-    if (rows.length === 0) return []
 
     const qF32 = new Float32Array(params.queryVector)
-    const hits: VectorHit[] = []
+    const topHits: VectorHit[] = []
+    const batchSize = 500
+    let offset = 0
+    let hasMore = true
 
-    for (const row of rows) {
-      const vF32 = base64ToVector(String(row.vector))
-      const score = cosineSimilarity(qF32, vF32)
-      hits.push({
-        chunkId: Number(row.chunk_id),
-        attachmentId: Number(row.attachment_id),
-        score,
-      })
+    const insertTopHit = (hit: VectorHit) => {
+      if (topHits.length < params.topK) {
+        topHits.push(hit)
+        topHits.sort((a, b) => b.score - a.score)
+      } else if (hit.score > topHits[topHits.length - 1].score) {
+        topHits[topHits.length - 1] = hit
+        topHits.sort((a, b) => b.score - a.score)
+      }
     }
 
-    hits.sort((a, b) => b.score - a.score)
-    return hits.slice(0, params.topK)
+    while (hasMore) {
+      const result = await db.query(
+        `SELECT chunk_id, attachment_id, vector FROM session_attachment_vector WHERE attachment_id IN (${placeholders}) LIMIT ? OFFSET ?`,
+        [...params.attachmentIds, batchSize, offset]
+      )
+      const rows = result.values ?? []
+      if (rows.length === 0) {
+        hasMore = false
+        break
+      }
+
+      for (const row of rows) {
+        const vF32 = base64ToVector(String(row.vector))
+        const score = cosineSimilarity(qF32, vF32)
+        insertTopHit({
+          chunkId: Number(row.chunk_id),
+          attachmentId: Number(row.attachment_id),
+          score,
+        })
+      }
+
+      if (rows.length < batchSize) {
+        hasMore = false
+      } else {
+        offset += batchSize
+      }
+    }
+
+    return topHits
   }
 
   public async deleteIndex(attachmentId: number): Promise<void> {

@@ -231,6 +231,21 @@ export class MobileRagDatabase {
     }
   }
 
+  public async cleanupInterruptedIndexingAttachments(): Promise<number> {
+    try {
+      const res = await this.database.query("SELECT id FROM session_attachment WHERE status = 'indexing'")
+      const rows = res.values ?? []
+      if (rows.length > 0) {
+        await this.database.run(
+          "UPDATE session_attachment SET status = 'failed', error = 'interrupted', processing_started_at = NULL WHERE status = 'indexing'"
+        )
+      }
+      return rows.length
+    } catch {
+      return 0
+    }
+  }
+
   public async createAttachment(params: CreateSessionAttachmentParams): Promise<number> {
     await this.initialize()
     const now = Date.now()

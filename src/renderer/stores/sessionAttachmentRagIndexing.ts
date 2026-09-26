@@ -8,13 +8,11 @@ import type { AttachmentPreparationResult, PreprocessedFile } from '../types/inp
 
 const log = getLogger('session-attachment-rag-indexing')
 
-import { supportsSessionAttachmentRag } from '@shared/platform'
-
 function shouldIndexPreparedAttachment(
   file: Pick<AttachmentPreparationResult, 'ragMode' | 'storageKey' | 'error' | 'sessionAttachmentAvailability'>
 ) {
   return (
-    supportsSessionAttachmentRag(platform.type) &&
+    (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) &&
     file.ragMode === 'session-retrieval' &&
     !!file.storageKey &&
     !file.error &&
@@ -24,7 +22,7 @@ function shouldIndexPreparedAttachment(
 
 function shouldIndexMessageFile(file: MessageFile) {
   return (
-    supportsSessionAttachmentRag(platform.type) &&
+    (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) &&
     file.ragMode === 'session-retrieval' &&
     !!file.storageKey &&
     isSessionAttachmentRagSupportedFilePath(file.name) &&

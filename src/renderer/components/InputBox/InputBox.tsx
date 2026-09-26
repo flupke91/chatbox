@@ -78,7 +78,6 @@ import * as picUtils from '@/packages/pic_utils'
 import { skillsController, subscribeSkillsChanged } from '@/packages/skills/controller'
 import { seedExactDraftTokens } from '@/packages/token-estimation'
 import platform from '@/platform'
-import { supportsSessionAttachmentRag } from '@shared/platform'
 import { StorageKeyGenerator } from '@/storage/StoreStorage'
 import * as atoms from '@/stores/atoms'
 import { resolveWebBrowsingMode } from '@/stores/session'
@@ -597,12 +596,12 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
         ...[...preprocessedSessionAttachmentIds].sort((a, b) => a - b),
       ],
       queryFn: () => {
-        if (!supportsSessionAttachmentRag(platform.type) || preprocessedSessionAttachmentIds.length === 0) {
+        if (!(platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) || preprocessedSessionAttachmentIds.length === 0) {
           return []
         }
         return platform.getSessionAttachmentRagController().getAttachments(preprocessedSessionAttachmentIds)
       },
-      enabled: supportsSessionAttachmentRag(platform.type) && preprocessedSessionAttachmentIds.length > 0,
+      enabled: (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) && preprocessedSessionAttachmentIds.length > 0,
       refetchInterval: (query): number | false => {
         const attachments = (query.state.data as SessionAttachment[] | undefined) ?? []
         return shouldRefetchSessionAttachmentStates(attachments, preprocessedSessionAttachmentIds.length) ? 1500 : false
@@ -641,7 +640,7 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
     )
     const recoverPreprocessedAttachment = useCallback(
       async (attachmentId: number) => {
-        if (!supportsSessionAttachmentRag(platform.type) || recoveringPreprocessedAttachmentIdsRef.current.has(attachmentId)) {
+        if (!(platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) || recoveringPreprocessedAttachmentIdsRef.current.has(attachmentId)) {
           return
         }
         recoveringPreprocessedAttachmentIdsRef.current.add(attachmentId)
@@ -922,7 +921,7 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
             preprocessedFilesForSubmit.flatMap((file) => (file.sessionAttachmentId ? [file.sessionAttachmentId] : []))
           )
         )
-        if (supportsSessionAttachmentRag(platform.type) && submitSessionAttachmentIds.length > 0) {
+        if ((platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) && submitSessionAttachmentIds.length > 0) {
           const latestAttachmentStates = await platform
             .getSessionAttachmentRagController()
             .getAttachments(submitSessionAttachmentIds)
@@ -1190,7 +1189,7 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
           }
 
           let nextPreprocessedFile: PreprocessedFile = preprocessedFile
-          if (supportsSessionAttachmentRag(platform.type)) {
+          if (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) {
             const draftMessageId = draftMessageIdRef.current || uuidv4()
             const indexedFile = await startPreparedSessionAttachmentIndexing({
               file,
@@ -1859,7 +1858,7 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
                             // Ignore cancellation errors
                           })
                         }
-                        if (supportsSessionAttachmentRag(platform.type) && preprocessedFile?.sessionAttachmentId) {
+                        if ((platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) && preprocessedFile?.sessionAttachmentId) {
                           void platform
                             .getSessionAttachmentRagController()
                             .deleteAttachment(preprocessedFile.sessionAttachmentId)
