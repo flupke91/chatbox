@@ -474,8 +474,85 @@ export class MobileRagDatabase {
       { statement: 'DELETE FROM session_attachment_parent WHERE attachment_id = ?', values: [attachmentId] },
     ])
 
-    // Insert parents individually to get their generated IDs
+    const useBatchExecuteSet = parents.length > 50 || children.length > 100
     const parentIdByOrder = new Map<number, number>()
+
+    if (useBatchExecuteSet) {
+      const BATCH = 400
+      for (let i = 0; i < parents.length; i += BATCH) {
+        const slice = parents.slice(i, i + BATCH)
+        const set: capSQLiteSet[] = slice.map((p) => ({
+          statement: `INSERT INTO session_attachment_parent (
+            attachment_id, parent_order, section_path, doc_type,
+            page_start, page_end, text, token_estimate, char_count, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          values: [
+            attachmentId,
+            p.parentOrder,
+            p.sectionPath ?? null,
+            p.docType ?? null,
+            p.pageStart ?? null,
+            p.pageEnd ?? null,
+            p.text,
+            p.tokenEstimate,
+            p.charCount,
+            now,
+          ],
+        }))
+        await this.database.executeSet(set)
+      }
+      const parentRows = await this.database.query(
+        'SELECT id, parent_order FROM session_attachment_parent WHERE attachment_id = ? ORDER BY parent_order ASC',
+        [attachmentId]
+      )
+      for (const r of parentRows.values ?? []) {
+        parentIdByOrder.set(Number(r.parent_order), Number(r.id))
+      }
+
+      for (let i = 0; i < children.length; i += BATCH) {
+        const slice = children.slice(i, i + BATCH)
+        const set: capSQLiteSet[] = slice.map((c) => {
+          const parentId = parentIdByOrder.get(c.parentOrder) ?? 0
+          const entitiesJson = c.entities?.length ? JSON.stringify(c.entities) : null
+          const keywordsJson = c.keywords?.length ? JSON.stringify(c.keywords) : null
+          const metadataJson = c.metadata ? JSON.stringify(c.metadata) : null
+          return {
+            statement: `INSERT INTO session_attachment_chunk (
+              attachment_id, parent_id, chunk_order, section_path,
+              page_start, page_end, raw_text, embedded_text, token_estimate,
+              entities, keywords, chapter_order, story_time, priority_rank, kind, metadata, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            values: [
+              attachmentId,
+              parentId,
+              c.chunkOrder,
+              c.sectionPath ?? null,
+              c.pageStart ?? null,
+              c.pageEnd ?? null,
+              c.rawText,
+              c.embeddedText,
+              c.tokenEstimate,
+              entitiesJson,
+              keywordsJson,
+              c.chapterOrder ?? null,
+              c.storyTime ?? null,
+              c.priorityRank ?? 2,
+              c.kind ?? null,
+              metadataJson,
+              now,
+            ],
+          }
+        })
+        await this.database.executeSet(set)
+      }
+      const chunkRows = await this.database.query(
+        'SELECT id FROM session_attachment_chunk WHERE attachment_id = ? ORDER BY chunk_order ASC',
+        [attachmentId]
+      )
+      return (chunkRows.values ?? []).map((r) => Number(r.id))
+    }
+
+    // Insert parents individually to get their generated IDs (small attachments & unit tests)
     for (const p of parents) {
       const res = await this.database.run(
         `INSERT INTO session_attachment_parent (
@@ -552,17 +629,48 @@ export class MobileRagDatabase {
     if (attachmentIds.length === 0) return []
     await this.initialize()
 
-    const terms = [
+    const genericHighFreq = new Set([
+      '方源', '古月方源', '蛊师', '蛊虫', '仙蛊', '杀招', '仙道杀招', '仙道',
+      '仙尊', '魔尊', '尊者', '名号', '底蕴', '流派', '境界', '功法', '能力',
+    ])
+    const entitySet = new Set((options.entities ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean))
+    const rawTerms = [
       ...(options.entities ?? []),
       ...(options.keywords ?? []),
     ]
       .map((t) => t.trim().toLowerCase())
       .filter((t) => t.length > 0)
 
-    if (terms.length === 0) return []
+    if (rawTerms.length === 0) return []
 
-    const uniqueTerms = [...new Set(terms)].slice(0, 10)
+    // Order specific entities/keywords ahead of ultra-frequent protagonist/generic terms,
+    // and drop redundant 2-char substrings that are already covered by a 3+ char specific term
+    const rawSpecific = [...new Set(rawTerms.filter((t) => !genericHighFreq.has(t)))]
+    const longSpecific = rawSpecific.filter((t) => t.length >= 3)
+    const filteredSpecific = rawSpecific.filter(
+      (t) => t.length >= 3 || !longSpecific.some((longTerm) => longTerm !== t && longTerm.includes(t))
+    )
+    const fallbackGenericTerms = [...new Set(rawTerms.filter((t) => genericHighFreq.has(t)))]
+    const uniqueTerms = [...filteredSpecific, ...fallbackGenericTerms].slice(0, 14)
+    const hasSpecificTerm = filteredSpecific.length > 0
+
     const placeholders = attachmentIds.map(() => '?').join(',')
+
+    const scoreExpressions = uniqueTerms.map((term) => {
+      if (hasSpecificTerm && genericHighFreq.has(term)) {
+        return `(CASE WHEN LOWER(c.section_path) LIKE ? OR LOWER(c.entities) LIKE ? THEN 2 WHEN LOWER(c.keywords) LIKE ? THEN 1 WHEN LOWER(c.raw_text) LIKE ? THEN 1 ELSE 0 END)`
+      }
+      if (entitySet.has(term) || term.length >= 4) {
+        const w = 6
+        return `(CASE WHEN LOWER(c.section_path) LIKE ? OR LOWER(c.entities) LIKE ? THEN ${w * 4} WHEN LOWER(c.keywords) LIKE ? THEN ${w * 3} WHEN LOWER(c.raw_text) LIKE ? THEN ${w * 3} ELSE 0 END)`
+      }
+      if (term.length === 3) {
+        const w = 5
+        return `(CASE WHEN LOWER(c.section_path) LIKE ? OR LOWER(c.entities) LIKE ? THEN ${w * 4} WHEN LOWER(c.keywords) LIKE ? THEN ${w * 3} WHEN LOWER(c.raw_text) LIKE ? THEN ${w * 3} ELSE 0 END)`
+      }
+      const w = 2
+      return `(CASE WHEN LOWER(c.section_path) LIKE ? OR LOWER(c.entities) LIKE ? THEN ${w * 3} WHEN LOWER(c.keywords) LIKE ? THEN ${w * 2} WHEN LOWER(c.raw_text) LIKE ? THEN ${w} ELSE 0 END)`
+    })
 
     const termConditions = uniqueTerms
       .map(
@@ -572,13 +680,18 @@ export class MobileRagDatabase {
       .join(' OR ')
 
     let sql = `
-      SELECT c.*, a.filename
+      SELECT c.*, a.filename, (${scoreExpressions.join(' + ')}) AS sql_match_score
       FROM session_attachment_chunk c
       JOIN session_attachment a ON c.attachment_id = a.id
       WHERE c.attachment_id IN (${placeholders})
         AND (${termConditions})
     `
-    const params: unknown[] = [...attachmentIds]
+    const params: unknown[] = []
+    for (const term of uniqueTerms) {
+      const pattern = `%${term}%`
+      params.push(pattern, pattern, pattern, pattern)
+    }
+    params.push(...attachmentIds)
     for (const term of uniqueTerms) {
       const pattern = `%${term}%`
       params.push(pattern, pattern, pattern, pattern)
@@ -590,27 +703,53 @@ export class MobileRagDatabase {
     }
 
     const limit = Math.max(1, Math.min(options.limit ?? 50, 100))
-    sql += ` ORDER BY c.priority_rank DESC, c.id ASC LIMIT ${limit}`
+    sql += ` ORDER BY CASE WHEN c.priority_rank = 0 THEN 0 ELSE 1 END DESC, sql_match_score DESC, c.priority_rank DESC, c.id ASC LIMIT ${limit}`
 
     const res = await this.database.query(sql, params)
     const rows = res.values ?? []
 
-    return rows.map((row) => {
+    const getTermWeight = (term: string): number => {
+      if (hasSpecificTerm && genericHighFreq.has(term)) return 0.35
+      if (entitySet.has(term) || term.length >= 4) return 4.0
+      return term.length === 3 ? 3.0 : 1.5
+    }
+
+    const totalPossibleWeight = uniqueTerms.reduce((acc, term) => acc + getTermWeight(term), 0)
+
+    const scored = rows.map((row) => {
       const chunk = mapRowToChunkRecord(row)
-      const textToSearch = `${chunk.sectionPath || ''} ${chunk.rawText} ${(chunk.entities || []).join(' ')} ${(chunk.keywords || []).join(' ')}`.toLowerCase()
-      let hitCount = 0
+      const sectionAndEntities = `${chunk.sectionPath || ''} ${(chunk.entities || []).join(' ')}`.toLowerCase()
+      const keywordsText = (chunk.keywords || []).join(' ').toLowerCase()
+      const rawTextLower = chunk.rawText.toLowerCase()
+
+      let weightedHits = 0
+      let specificEntityHit = false
       for (const term of uniqueTerms) {
-        if (textToSearch.includes(term)) {
-          hitCount++
+        const w = getTermWeight(term)
+        const isSpecific = !hasSpecificTerm || !genericHighFreq.has(term)
+        if (sectionAndEntities.includes(term)) {
+          weightedHits += w
+          if (term.length >= 2 && isSpecific) specificEntityHit = true
+        } else if (keywordsText.includes(term)) {
+          weightedHits += w * 0.9
+          if (term.length >= 2 && isSpecific) specificEntityHit = true
+        } else if (rawTextLower.includes(term)) {
+          weightedHits += w * 0.8
+          if ((entitySet.has(term) || term.length >= 3) && isSpecific) specificEntityHit = true
         }
       }
-      const matchScore = hitCount / uniqueTerms.length
+      const rawRatio = totalPossibleWeight > 0 ? weightedHits / totalPossibleWeight : 0
+      const matchScore = Math.min(1.0, specificEntityHit ? Math.max(0.48, rawRatio * 1.35) : rawRatio)
       return {
         ...chunk,
         filename: String(row.filename),
         matchScore,
       }
     })
+
+    return scored
+      .sort((a, b) => b.matchScore - a.matchScore || (b.priorityRank ?? 2) - (a.priorityRank ?? 2) || a.id - b.id)
+      .slice(0, limit)
   }
 
   public async listChunks(attachmentId: number): Promise<SessionAttachmentChunkRecord[]> {

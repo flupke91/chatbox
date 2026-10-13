@@ -417,30 +417,150 @@ export function isStoryKbFormat(content: string): boolean {
   )
 }
 
+function parseChapterNumberFromId(rawId: unknown): number | undefined {
+  if (typeof rawId === 'number' && Number.isFinite(rawId) && rawId > 0 && rawId <= 2500) {
+    return Math.floor(rawId)
+  }
+  if (typeof rawId !== 'string') return undefined
+  const m = rawId.match(/(?:^|[:_])(?:ch0*|CH_0*|第\s*)(\d{1,4})(?!\d)/i)
+  if (!m) return undefined
+  const num = parseInt(m[1], 10)
+  return Number.isFinite(num) && num > 0 && num <= 2500 ? num : undefined
+}
+
+function isSubstantiveStoryCard(name: string, cardText: string, explicitSubstantive?: boolean): boolean {
+  if (explicitSubstantive === false) return false
+  if (!cardText) return false
+  if (name.startsWith('****') || cardText.startsWith('****')) return false
+  if (
+    cardText.includes('同源事实') ||
+    cardText.includes('未在本 chunk 说明') ||
+    cardText.includes('本chunk未写') ||
+    cardText.includes('record_type:mention') ||
+    cardText.includes('record_id:mention:') ||
+    cardText.includes('candidate_entity:') ||
+    cardText.includes('record_type:info_reveal_clue')
+  ) {
+    return false
+  }
+  const normalizedName = name.trim()
+  const stripped = cardText
+    .replace(/^[^：:]+[：:]\s*/, '')
+    .replace(/[。.;；!！?？\s]+$/g, '')
+    .trim()
+  if (!stripped || stripped === normalizedName) return false
+  return true
+}
+
 export function chunkStoryKbDocument(content: string): AttachmentChunkingResult {
   const data = JSON.parse(content)
-  const catalog = data.mobile_card_catalog as Array<[string, string, number]> | undefined
-  const catalogMap = new Map<string, { kind: string; priorityRank: number }>()
+  const catalog = data.mobile_card_catalog as Array<unknown[]> | undefined
+  const catalogMap = new Map<string, { kind: string; priorityRank: number; substantive: boolean; ordinal?: number }>()
+  const ordinalToCardId = new Map<number, string>()
+
   if (Array.isArray(catalog)) {
-    for (const entry of catalog) {
-      if (Array.isArray(entry) && entry.length >= 3) {
-        catalogMap.set(String(entry[0]), { kind: String(entry[1]), priorityRank: Number(entry[2]) })
+    for (let idx = 0; idx < catalog.length; idx++) {
+      const entry = catalog[idx]
+      if (!Array.isArray(entry) || entry.length < 3) continue
+      // Support both GUR-MOBILE-CARD-2 5-tuple: [ordinal, card_id, kind, priority_rank, substantive]
+      // and legacy GUR-MOBILE-CARD-1 3-tuple: [card_id, kind, priority_rank]
+      if (typeof entry[0] === 'number' && entry.length >= 4) {
+        const ordinal = Number(entry[0])
+        const cardId = String(entry[1])
+        const kind = String(entry[2])
+        const rawRank = Number(entry[3])
+        const priorityRank = Number.isFinite(rawRank) ? rawRank : 2
+        const substantive = entry.length >= 5 ? Number(entry[4]) !== 0 : true
+        catalogMap.set(cardId, { kind, priorityRank, substantive, ordinal })
+        ordinalToCardId.set(ordinal, cardId)
+      } else {
+        const cardId = String(entry[0])
+        const kind = String(entry[1])
+        const rawRank = Number(entry[2])
+        const priorityRank = Number.isFinite(rawRank) ? rawRank : 2
+        const substantive = entry.length >= 4 ? Number(entry[3]) !== 0 : true
+        catalogMap.set(cardId, { kind, priorityRank, substantive, ordinal: idx })
+        ordinalToCardId.set(idx, cardId)
       }
     }
   }
 
+  // Build chapter ordinal -> actual 1-based chapter number map
+  // In GUR mobile KB, card.ch stores chapter_catalog ordinals (e.g., ordinal 1038 -> "ch0001" -> chapter 1)
+  const chapterOrdinalToNumber = new Map<number, number>()
+  if (Array.isArray(data.chapter_catalog)) {
+    for (const entry of data.chapter_catalog) {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        const ordinal = Number(entry[0])
+        const chrono = typeof entry[2] === 'number' && entry[2] > 0 ? entry[2] : parseChapterNumberFromId(entry[1])
+        if (Number.isFinite(ordinal) && chrono !== undefined) {
+          chapterOrdinalToNumber.set(ordinal, chrono)
+        }
+      }
+    }
+  }
+  if (Array.isArray(data.anchors)) {
+    for (const anchor of data.anchors) {
+      if (!anchor || typeof anchor !== 'object') continue
+      const aid = String(anchor._id || '')
+      if (aid.startsWith('anchor:chapter:')) {
+        const ordinal = parseInt(aid.slice('anchor:chapter:'.length), 10)
+        const chNum = parseChapterNumberFromId(anchor.name)
+        if (Number.isFinite(ordinal) && chNum !== undefined && !chapterOrdinalToNumber.has(ordinal)) {
+          chapterOrdinalToNumber.set(ordinal, chNum)
+        }
+      }
+    }
+  }
+
+  // Build reverse alias map from mobile_router.aliases (supports both alias -> ordinal[] and name -> alias_string[])
+  const routerAliasesByCardId = new Map<string, string[]>()
+  const routerAliasesByName = new Map<string, string[]>()
+  const routerAliases = data.mobile_router?.aliases
+  if (routerAliases && typeof routerAliases === 'object') {
+    for (const [aliasOrName, postings] of Object.entries(routerAliases)) {
+      if (!aliasOrName || !Array.isArray(postings)) continue
+      for (const item of postings) {
+        if (typeof item === 'number' || (typeof item === 'string' && /^\d+$/.test(item))) {
+          const cid = ordinalToCardId.get(Number(item))
+          if (cid) {
+            let list = routerAliasesByCardId.get(cid)
+            if (!list) {
+              list = []
+              routerAliasesByCardId.set(cid, list)
+            }
+            if (!list.includes(aliasOrName)) list.push(aliasOrName)
+          }
+        } else if (typeof item === 'string' && item.trim()) {
+          let list = routerAliasesByName.get(aliasOrName)
+          if (!list) {
+            list = []
+            routerAliasesByName.set(aliasOrName, list)
+          }
+          if (!list.includes(item.trim())) list.push(item.trim())
+        }
+      }
+    }
+  }
+
+  // Optional evidence catalog lookup for verbatim novel quotes
+  const evidenceCatalog = Array.isArray(data.evidence_catalog) ? data.evidence_catalog : undefined
+
   const sections = [
+    'calibrated_cards',
     'entities',
-    'events',
-    'items_and_gu',
     'character_states',
+    'items_and_gu',
+    'events',
     'rules',
     'factions',
     'locations',
-    'conflicts',
+    'relationships',
+    'terms',
     'claims',
-    'calibrated_cards',
-    'anchors',
+    'foreshadows',
+    'conflicts',
+    'timeline',
   ]
 
   const parents: ParentBlock[] = []
@@ -464,6 +584,33 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
     currentParentCards = []
   }
 
+  const resolveCardChapterOrder = (card: Record<string, unknown>): number | undefined => {
+    const resolvedChapters: number[] = []
+    if (Array.isArray(card.ch)) {
+      for (const rawCh of card.ch) {
+        if (typeof rawCh !== 'number' || !Number.isFinite(rawCh)) continue
+        if (chapterOrdinalToNumber.size > 0) {
+          const mapped = chapterOrdinalToNumber.get(rawCh)
+          if (mapped !== undefined) resolvedChapters.push(mapped)
+        } else if (rawCh > 0) {
+          resolvedChapters.push(rawCh)
+        }
+      }
+    }
+    if (resolvedChapters.length === 0 && typeof card.chapter_order === 'number' && card.chapter_order > 0) {
+      resolvedChapters.push(card.chapter_order)
+    }
+    if (resolvedChapters.length === 0 && Array.isArray(card.src_ids)) {
+      for (const sid of card.src_ids) {
+        const parsed = parseChapterNumberFromId(sid)
+        if (parsed !== undefined) {
+          resolvedChapters.push(parsed)
+        }
+      }
+    }
+    return resolvedChapters.length > 0 ? Math.min(...resolvedChapters) : undefined
+  }
+
   for (const sectionName of sections) {
     const list = data[sectionName]
     if (!Array.isArray(list) || list.length === 0) continue
@@ -477,14 +624,50 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
       if (!cardText) continue
 
       const catInfo = catalogMap.get(id)
+      const substantive = isSubstantiveStoryCard(name, cardText, catInfo?.substantive)
       const kind = catInfo?.kind || sectionName
-      const priorityRank = catInfo?.priorityRank ?? (sectionName === 'entities' || sectionName === 'events' ? 3 : 2)
-      const keys = Array.isArray(card.keys) ? card.keys.map(String) : []
-      const entities = name ? [name, ...keys] : keys
-      const chapterOrder = Array.isArray(card.ch) && typeof card.ch[0] === 'number' ? card.ch[0] : undefined
+      let priorityRank =
+        catInfo?.priorityRank ??
+        (sectionName === 'calibrated_cards'
+          ? 5
+          : sectionName === 'entities' || sectionName === 'events' || sectionName === 'items_and_gu'
+            ? 3
+            : 2)
+      if (!substantive) {
+        priorityRank = 0
+      }
+
+      const rawKeys = Array.isArray(card.keys) ? card.keys.map(String) : []
+      const cardAliases = Array.isArray(card.aliases) ? card.aliases.map(String) : []
+      const routerAliasesForCard = routerAliasesByCardId.get(id) ?? []
+      const routerAliasesForName = routerAliasesByName.get(name) ?? []
+      const mergedAliases = [...new Set([...cardAliases, ...routerAliasesForCard, ...routerAliasesForName])].filter(Boolean)
+      const keys = [...new Set([...rawKeys, ...mergedAliases])].filter(Boolean)
+      const entities = [...new Set([name, ...mergedAliases, ...rawKeys].filter(Boolean))]
+      const chapterOrder = resolveCardChapterOrder(card as Record<string, unknown>)
       const storyTime = typeof card.story_time === 'string' ? card.story_time : undefined
 
-      const cardRepresentation = `[${kind}: ${id}] ${name}\n${cardText}`
+      let quoteSuffix = ''
+      if (evidenceCatalog && Array.isArray(card.ev) && substantive) {
+        const quotes: string[] = []
+        for (const evOrd of card.ev.slice(0, 2)) {
+          const evEntry = evidenceCatalog[Number(evOrd)]
+          if (Array.isArray(evEntry)) {
+            const quoteStr = typeof evEntry[4] === 'string' ? evEntry[4] : typeof evEntry[3] === 'string' ? evEntry[3] : ''
+            if (quoteStr.trim()) {
+              quotes.push(quoteStr.trim())
+            }
+          }
+        }
+        if (quotes.length > 0) {
+          quoteSuffix = `\n【原文印证】${quotes.join(' ｜ ')}`
+        }
+      }
+
+      const aliasLabel = mergedAliases.length > 0 ? ` (别名: ${mergedAliases.join('、')})` : ''
+      const chapterLabel = chapterOrder !== undefined ? ` [第${chapterOrder}章]` : ''
+      const fullChildText = `${cardText}${quoteSuffix}`
+      const cardRepresentation = `[${kind}: ${id}] ${name}${aliasLabel}${chapterLabel}\n${fullChildText}`
       if (currentParentCards.join('\n\n').length + cardRepresentation.length > PARENT_TARGET_CHARS) {
         flushParent()
       }
@@ -494,7 +677,7 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
         parentOrder: currentParentOrder,
         chunkOrder: children.length,
         sectionPath: `${sectionName}:${name || id}`,
-        rawText: cardText,
+        rawText: fullChildText,
         tokenEstimate: estimateTokenCount(cardText),
         entities,
         keywords: keys,
@@ -504,6 +687,8 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
         kind,
         metadata: {
           id,
+          substantive,
+          aliases: mergedAliases.length > 0 ? mergedAliases : undefined,
           refs: card.refs,
           ev: card.ev,
           src_ids: card.src_ids,
@@ -516,27 +701,59 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
 
   // Include runtime_core if present (world/cultivation rules)
   if (data.runtime_core && typeof data.runtime_core === 'object') {
-    const coreText = Object.entries(data.runtime_core)
-      .map(([k, v]) => `### [rule] ${k}\n${typeof v === 'string' ? v : JSON.stringify(v)}`)
-      .join('\n\n')
-    parents.push({
-      parentOrder: currentParentOrder,
-      sectionPath: 'runtime_core',
-      text: coreText,
-      tokenEstimate: estimateTokenCount(coreText),
-      charCount: coreText.length,
-    })
-    children.push({
-      parentOrder: currentParentOrder,
-      chunkOrder: children.length,
-      sectionPath: 'runtime_core',
-      rawText: coreText,
-      tokenEstimate: estimateTokenCount(coreText),
-      entities: ['世界规则', '修炼规则'],
-      keywords: ['世界规则', '修炼规则', '剧透策略'],
-      priorityRank: 4,
-      kind: 'rule',
-    })
+    currentSection = 'runtime_core'
+    for (const [coreKey, coreVal] of Object.entries(data.runtime_core)) {
+      if (Array.isArray(coreVal)) {
+        for (const item of coreVal) {
+          if (item && typeof item === 'object' && 'statement' in item) {
+            const ruleObj = item as Record<string, unknown>
+            const ruleId = String(ruleObj.rule_id || coreKey)
+            const category = String(ruleObj.category || coreKey)
+            const statement = String(ruleObj.statement || '').trim()
+            if (!statement) continue
+            const ruleText = `[${coreKey}: ${ruleId}] (${category}) ${statement}`
+            if (currentParentCards.join('\n\n').length + ruleText.length > PARENT_TARGET_CHARS) {
+              flushParent()
+            }
+            currentParentCards.push(ruleText)
+            children.push({
+              parentOrder: currentParentOrder,
+              chunkOrder: children.length,
+              sectionPath: `runtime_core:${ruleId}`,
+              rawText: ruleText,
+              tokenEstimate: estimateTokenCount(ruleText),
+              entities: ['世界规则', '修炼规则', category],
+              keywords: ['世界规则', '修炼规则', category, ruleId],
+              priorityRank: 4,
+              kind: 'rule',
+            })
+          }
+        }
+        flushParent()
+      } else if (typeof coreVal === 'string' && coreVal.trim()) {
+        const ruleText = `### [rule] ${coreKey}\n${coreVal.trim()}`
+        parents.push({
+          parentOrder: currentParentOrder,
+          sectionPath: 'runtime_core',
+          text: ruleText,
+          tokenEstimate: estimateTokenCount(ruleText),
+          charCount: ruleText.length,
+        })
+        children.push({
+          parentOrder: currentParentOrder,
+          chunkOrder: children.length,
+          sectionPath: 'runtime_core',
+          rawText: ruleText,
+          tokenEstimate: estimateTokenCount(ruleText),
+          entities: ['世界规则', '修炼规则'],
+          keywords: ['世界规则', '修炼规则', '剧透策略'],
+          priorityRank: 4,
+          kind: 'rule',
+        })
+        currentParentOrder++
+      }
+    }
+    flushParent()
   }
 
   return { parents, children }

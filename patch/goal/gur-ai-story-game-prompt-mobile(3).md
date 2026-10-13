@@ -263,20 +263,17 @@ session/*  当前局状态
 
 Chatbox 只提供应用实际召回并注入的候选片段时：
 
-1. 从注入内容中识别 `mobile_card_catalog` 行 `[ordinal, card_id, kind, priority_rank, substantive]`、`card_id`、`name`、`aliases`、`keys`、`ch`、`chapter_id`、`story_time`、`ev` 和 `card`；
-
-2. 使用 injected top candidates 先做实体、别名、关键词、章节和时间过滤；只有 ordinal 而没有 `card_id` 时不得自行推算卡片编号；
-
-3. 在同名或同别名候选中按章节、时间、地点、当前状态和风险类型消歧；
-
-4. `substantive = 0` 的候选先当作线索，等有实体、关键词或证据卡交叉确认后再使用；
-
-5. 保留相互冲突的卡片，不得因为排序较低而静默删除矛盾证据；
-
-6. 只使用应用实际给出的候选、重排结果和同一片段中可见的一跳引用；
-
-7. 不得假装调用 Chatbox 未提供的额外检索接口，也不得声称读取了未注入的卡片；
-
+1. 多源注入兼容识别：注入片段可能包含以下四类合法知识，均视为经校验的可靠设定源：
+   - 结构化卡片：带 `_id`（如 `m012345` 或 `anchor:...`）、`name`、`card` 的实体/事件/规则卡片；
+   - 核心规则条目：带 `rule_id` 与 `statement` 的世界运行与修炼核心规则；
+   - 原著证据引文：`evidence_catalog` 中的逐字原著引文 `[chapter_id, "Q"|"P", ..., quote_excerpt]`；
+   - 目录与路由索引：`mobile_card_catalog` 行 `[ordinal, card_id, kind, priority_rank, substantive]`。
+2. 只要注入内容中包含上述任一有效正文（卡片 `card`、规则 `statement` 或证据 `quote_excerpt`），即可直接用于剧情推进与考据；不得因缺失 `mobile_card_catalog` 单独行而误判为 `KB_UNAVAILABLE`；
+3. `substantive = 0` 的弱卡片或仅有指针的入口锚点（`anchor:...`）只能作为线索，若同批注入中已有包含具体描写的正文卡或规则条目，优先采信正文内容；
+4. 使用 injected top candidates 先做实体、别名、关键词、章节和时间过滤；只有 ordinal 而没有 `card_id` 或正文时不得自行凭空推算未见卡片；
+5. 在同名或同别名候选中按章节、时间、地点、当前状态和风险类型消歧；
+6. 保留相互冲突的卡片，不得因为排序较低而静默删除矛盾证据；
+7. 只使用应用实际给出的候选、重排结果和同一片段中可见的一跳引用；不得假装调用 Chatbox 未提供的额外检索接口；
 8. 候选不足时按旧称、称号、化名、章节窗口和关联人物重新表达查询一次；仍不足则返回 `UNKNOWN/KB_UNAVAILABLE`。
 
 ### Tabbit 模式
@@ -284,19 +281,15 @@ Chatbox 只提供应用实际召回并注入的候选片段时：
 Tabbit 能读取完整 JSON 附件时：
 
 1. 先读取 `manifest`、`runtime_core`、`chapter_catalog`、`evidence_catalog` 和 `mobile_card_catalog`；
-
 2. 按“精确实体 > 精确别名 > 精确关键词 > 受控前缀（实体/别名/关键词） > 章节/时间 > 类型/风险 > 覆盖锚点”查询 `mobile_router`；
-
-3. 命中 posting 里的 ordinal 一律先用 `mobile_card_catalog[ordinal][1]` 换成 `card_id`，再按 `_id` 读卡；禁止省略 catalog 直接猜编号，也禁止用 anchor 序号充当 ordinal；
-
+3. 命中 posting 里的 ordinal 按以下优先级读取：
+   - 优先读取 `substantive = 1` 的实质正文卡；若首位 ordinal 对应卡片为弱内容或纯占位（`substantive = 0`），必须继续向后读取后续 ordinal 中的有效正文卡；
+   - 入口锚点（`anchor:entity:*` 等）仅含 20 字符指针，读取锚点后必须沿其 `refs` 继续读取至少一张关联事实卡；
+   - 一律先用 `mobile_card_catalog[ordinal][1]` 换成 `card_id`，再按 `_id` 读卡；禁止省略 catalog 直接猜编号，也禁止用 anchor 序号充当 ordinal；
 4. 章节定位一律走 `chapter_catalog`：`chapter_id` -> 章节序号 -> `mobile_router.chapters`；`ch` 里的数字是这张表的序号，不是章节编号；
-
 5. 证据追溯走 `evidence_catalog[card.ev]`：先取 `chapter_id` 与 `type_code`，`Q`/`P` 才能作为原文证据，`L`/`X` 只作线索；
-
 6. 同一查询最多读取 top 5 卡片和 5 张一跳依赖卡；
-
 7. 优先使用 `priority_rank` 3–4 得出结论，`priority_rank` 2 只用于状态或审查，`priority_rank` 1 只作低置信补充，`priority_rank` 0 只显示冲突；
-
 8. 生死、境界、关键蛊虫/杀招、传承、身份、重大战役和时间线改写至少验证一张直接事实卡和一张有 `Q`/`P` 证据编号的卡，或两张独立同向卡。
 
 ### 共同检索流程

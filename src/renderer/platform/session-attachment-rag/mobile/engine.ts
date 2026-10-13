@@ -23,6 +23,23 @@ import type {
 } from './types'
 import { SQLiteBlobVectorStore } from './vector-store'
 
+export interface MobileRagQueryTrace {
+  timestamp: number
+  query: string
+  extractedKeywords: string[]
+  currentChapter?: number
+  activeEntities: string[]
+  vectorHitCount: number
+  keywordHitCount: number
+  candidateCount: number
+  durationMs: number
+  topResults: Array<{
+    parentId: number
+    sectionPath?: string
+    score: number
+  }>
+}
+
 export interface MobileEngineDependencies {
   database?: MobileRagDatabase
   vectorStore?: SQLiteBlobVectorStore
@@ -32,30 +49,101 @@ export interface MobileEngineDependencies {
   embedValues?: (model: EmbeddingModel, values: string[]) => Promise<number[][]>
 }
 
+const QUERY_STOPWORDS = new Set([
+  '什么', '怎么', '如何', '为什么', '为何', '哪些', '哪个', '哪里', '何处', '何时',
+  '现在', '目前', '当前', '多少', '是否', '能否', '可以', '能够', '一个', '一些',
+  '这个', '那个', '这些', '那些', '他们', '她们', '它们', '我们', '你们', '自己',
+  '身上', '手里', '之中', '之后', '之前', '时候', '事情', '情况', '表现', '来历',
+  '威力', '作用', '效果', '关系', '有什么', '是什么', '怎么样', '厉害', '奇异',
+  '或者', '以及', '并且', '但是', '因为', '所以', '如果', '虽然', '进行', '使用',
+  '拥有', '获得', '关于', '请问', '告诉', '介绍一下', '介绍', '分别', '等级', '区别',
+  '划分', '特点', '隐患', '结果', '最后', '关头', '终于', '出现',
+])
+
+const GENERIC_STORY_TERMS = new Set([
+  '方源', '古月方源', '蛊师', '蛊虫', '仙蛊', '杀招', '仙道杀招', '仙道',
+  '仙尊', '魔尊', '尊者', '名号', '底蕴', '流派', '境界', '功法', '能力',
+])
+
 export function extractQueryKeywords(query: string): string[] {
-  const terms: string[] = []
-  const quoted = query.match(/["“「](.+?)["”」]/g)
-  if (quoted) {
-    for (const q of quoted) {
-      const clean = q.slice(1, -1).trim()
-      if (clean) terms.push(clean)
+  const highPriorityTerms: string[] = []
+  const standardTerms: string[] = []
+  const ngramTerms: string[] = []
+  const genericTerms: string[] = []
+
+  const pushTerm = (bucket: string[], raw: string) => {
+    const clean = raw
+      .replace(/^(?:什么|怎么|如何|哪些|哪个|哪里|为何)+/, '')
+      .replace(/(?:什么|怎么|如何|哪些|哪个|哪里|为何)+$/, '')
+      .trim()
+    if (!clean || clean.length < 2 || QUERY_STOPWORDS.has(clean)) return
+    if (GENERIC_STORY_TERMS.has(clean)) {
+      genericTerms.push(clean)
+    } else {
+      bucket.push(clean)
     }
   }
 
-  // 1. English / Latin alphanumeric tokens
-  const latinWords = query.match(/[a-zA-Z0-9_-]{2,}/g)
-  if (latinWords) {
-    terms.push(...latinWords)
+  const quoted = query.match(/["“「『【](.+?)["”」』】]/g)
+  if (quoted) {
+    for (const q of quoted) {
+      pushTerm(highPriorityTerms, q.slice(1, -1))
+    }
   }
 
-  // 2. CJK word segmentation using Intl.Segmenter (native in modern WebViews & Node.js)
+  // 1. Split query by punctuation and Chinese grammatical particles into clean phrase chunks
+  const phraseChunks = query
+    .split(/[，。？！、；：“”‘’「」『』【】（）()《》\s的在用是了回到去有和与或及把将被让给从向对时后前里中上下吗呢吧啊呀么之其此彼他她它我你]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2)
+
+  for (const chunk of phraseChunks) {
+    // Direct short noun phrase (2-5 chars) after particle splitting
+    if (/^[\u4e00-\u9fa5]{2,5}$/.test(chunk) && !QUERY_STOPWORDS.has(chunk)) {
+      pushTerm(highPriorityTerms, chunk)
+    }
+
+    // Domain suffix compounds within clean phrase chunk
+    const suffixMatches = chunk.match(
+      /[\u4e00-\u9fa5]{1,4}(?:仙尊|魔尊|尊者|仙蛊|蛊虫|蛊师|本命蛊|蛊|福地|洞天|山寨|山|城|寨|河|川|原|谷|海|楼|阁|殿|体|真传|传承|杀招|大典|狼潮|王庭|天庭|长生天)/g
+    )
+    if (suffixMatches) {
+      for (const m of suffixMatches) {
+        pushTerm(highPriorityTerms, m)
+      }
+    }
+
+    // Domain prefix compounds within clean phrase chunk
+    const prefixMatches = chunk.match(
+      /(?:古月|白家|熊家|太白|黑楼|凤九|巨阳|星宿|红莲|无极|元莲|盗天|狂蛮|幽魂|乐土|大爱|大梦|青茅|三王|义天|狐仙|琅琊|八十八角|逆流|至尊|春秋|月光|酒虫|白豕|血颅|天元宝|定仙|宿命|智慧|北冥|花酒|商量|白骨|荡魂|石莲|雷冠)[\u4e00-\u9fa5]{1,3}/g
+    )
+    if (prefixMatches) {
+      for (const m of prefixMatches) {
+        pushTerm(highPriorityTerms, m)
+      }
+    }
+  }
+
+  // 2. English / Latin alphanumeric tokens
+  const latinWords = query.match(/[a-zA-Z0-9_-]{2,}/g)
+  if (latinWords) {
+    highPriorityTerms.push(...latinWords)
+  }
+
+  // 3. CJK word segmentation using Intl.Segmenter on each clean phrase chunk
   if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
     try {
       const segmenter = new (Intl as any).Segmenter('zh-CN', { granularity: 'word' })
-      for (const { segment, isWordLike } of segmenter.segment(query)) {
-        const clean = segment.trim()
-        if (isWordLike && clean.length >= 2 && clean.length <= 10) {
-          terms.push(clean)
+      for (const chunk of phraseChunks) {
+        for (const { segment, isWordLike } of segmenter.segment(chunk)) {
+          const clean = segment.trim()
+          if (isWordLike && clean.length >= 2 && clean.length <= 8 && !QUERY_STOPWORDS.has(clean)) {
+            if (clean.length >= 3) {
+              pushTerm(highPriorityTerms, clean)
+            } else {
+              pushTerm(standardTerms, clean)
+            }
+          }
         }
       }
     } catch {
@@ -63,18 +151,18 @@ export function extractQueryKeywords(query: string): string[] {
     }
   }
 
-  // 3. CJK 2-3 char n-grams for recall resilience
-  const cjkChars = query.replace(/[^\u4e00-\u9fa5]/g, '')
-  if (cjkChars.length >= 2) {
-    for (let i = 0; i <= cjkChars.length - 2; i++) {
-      terms.push(cjkChars.slice(i, i + 2))
-      if (i <= cjkChars.length - 3) {
-        terms.push(cjkChars.slice(i, i + 3))
-      }
+  // 4. CJK 2-3 char n-grams inside clean phrase chunks for recall resilience
+  for (const seg of phraseChunks) {
+    if (!/^[\u4e00-\u9fa5]+$/.test(seg)) continue
+    for (let i = 0; i <= seg.length - 3; i++) {
+      pushTerm(ngramTerms, seg.slice(i, i + 3))
+    }
+    for (let i = 0; i <= seg.length - 2; i++) {
+      pushTerm(ngramTerms, seg.slice(i, i + 2))
     }
   }
 
-  return [...new Set(terms)].filter(Boolean)
+  return [...new Set([...highPriorityTerms, ...standardTerms, ...ngramTerms, ...genericTerms])].filter(Boolean)
 }
 
 export function detectChapterFromQuery(query: string): number | undefined {
@@ -92,6 +180,7 @@ export class MobileLocalRagEngine {
   private queue: Promise<void> = Promise.resolve()
   private resolveEmbedding: (modelString?: string) => Promise<{ provider: EmbeddingModel; modelString: string }>
   private embedValues: (model: EmbeddingModel, values: string[]) => Promise<number[][]>
+  private queryTraces: MobileRagQueryTrace[] = []
 
   constructor(dependencies: MobileEngineDependencies = {}) {
     this.database = dependencies.database ?? new MobileRagDatabase()
@@ -205,9 +294,21 @@ export class MobileLocalRagEngine {
     return this.database.cleanupOrphans(params.sessionIds, params.messageIds)
   }
 
+  public getQueryTraces(): MobileRagQueryTrace[] {
+    return [...this.queryTraces]
+  }
+
+  public clearQueryTraces(): void {
+    this.queryTraces = []
+  }
+
   public async getDebugSnapshot(): Promise<SessionAttachmentRagDebugSnapshot> {
     await this.initialize()
-    return this.database.getDebugSnapshot()
+    const snapshot = await this.database.getDebugSnapshot()
+    return {
+      ...snapshot,
+      ...(this.queryTraces.length > 0 ? { recentQueries: this.getQueryTraces() } : {}),
+    } as SessionAttachmentRagDebugSnapshot
   }
 
   public async clearAll(): Promise<number> {
@@ -237,6 +338,7 @@ export class MobileLocalRagEngine {
     query: string
     plan: SessionAttachmentQueryPlan
   }): Promise<SessionAttachmentSearchResult[]> {
+    const startMs = Date.now()
     const attachmentIds = [...new Set((params.attachmentIds ?? []).filter((id) => Number.isFinite(id)))]
     if (!params.query?.trim() || attachmentIds.length === 0) {
       return []
@@ -256,25 +358,32 @@ export class MobileLocalRagEngine {
 
     const currentChapter = storyFilter?.currentChapter ?? detectChapterFromQuery(rawQuery)
     const currentTime = storyFilter?.currentTime
-    const activeEntities = new Set(storyFilter?.activeEntities ?? [])
+    const activeEntities = new Set((storyFilter?.activeEntities ?? []).map((e) => e.toLowerCase()))
     const extractedKeywords = extractQueryKeywords(rawQuery)
 
-    // 1. Generate query embedding for Vector Search
-    const { provider } = await this.resolveEmbedding()
-    const embeddings = await this.embedValues(provider, [rawQuery])
-    const queryVector = embeddings[0]
-
-    // 2. Multi-source recall (30-50 candidates)
-    const recallLimit = Math.max(plan.recallTopK, 30)
-    const vectorHits = await this.vectorStore.query({
-      attachmentIds: readyIds,
-      queryVector,
-      topK: recallLimit,
-    })
+    // 1. Multi-source recall (30-50 candidates) with fault-tolerant Vector Search
+    const recallLimit = Math.max(plan.recallTopK, 35)
+    let vectorHits: Array<{ chunkId: number; attachmentId: number; score: number }> = []
+    try {
+      const { provider } = await this.resolveEmbedding()
+      const embeddings = await this.embedValues(provider, [rawQuery])
+      const queryVector = embeddings[0]
+      if (Array.isArray(queryVector) && queryVector.length > 0) {
+        vectorHits = await this.vectorStore.query({
+          attachmentIds: readyIds,
+          queryVector,
+          topK: recallLimit,
+        })
+      }
+    } catch {
+      // Fault-tolerant fallback: when no embedding model is configured or offline,
+      // rely on hybrid structured keyword + entity + metadata retrieval.
+      vectorHits = []
+    }
 
     const keywordHits = await this.database.searchKeywordChunks(readyIds, {
       keywords: extractedKeywords,
-      entities: Array.from(activeEntities),
+      entities: storyFilter?.activeEntities ?? [],
       maxChapter: currentChapter,
       limit: recallLimit,
     })
@@ -284,17 +393,33 @@ export class MobileLocalRagEngine {
     for (const h of keywordHits) candidateChunkIds.add(h.id)
 
     if (candidateChunkIds.size === 0) {
+      this.recordQueryTrace({
+        timestamp: startMs,
+        query: rawQuery,
+        extractedKeywords,
+        currentChapter,
+        activeEntities: storyFilter?.activeEntities ?? [],
+        vectorHitCount: vectorHits.length,
+        keywordHitCount: keywordHits.length,
+        candidateCount: 0,
+        durationMs: Date.now() - startMs,
+        topResults: [],
+      })
       return []
     }
 
-    // 3. Fetch candidate chunk details
+    // 2. Fetch candidate chunk details
     const chunks = await this.database.listChunksWithDetails(Array.from(candidateChunkIds))
     const vectorHitMap = new Map(vectorHits.map((h) => [h.chunkId, h.score]))
     const keywordHitMap = new Map(keywordHits.map((h) => [h.id, h.matchScore]))
 
     const lowerQuery = rawQuery.toLowerCase()
 
-    // 4. Hybrid Scoring & Timeline/State Filtering
+    const hasSpecificTarget =
+      extractedKeywords.some((k) => !GENERIC_STORY_TERMS.has(k)) ||
+      Array.from(activeEntities).some((e) => !GENERIC_STORY_TERMS.has(e))
+
+    // 3. Hybrid Scoring & Timeline/State Filtering
     const scoredCandidates = chunks
       .map((chunk) => {
         const rawVectorScore = vectorHitMap.get(chunk.id) ?? 0
@@ -302,12 +427,25 @@ export class MobileLocalRagEngine {
         const sKw = keywordHitMap.get(chunk.id) ?? 0
 
         let sEntity = 0
-        const chunkEntities = (chunk.entities ?? []).map((e) => e.toLowerCase())
+        let specificMatchedCount = 0
+        let primaryEntityMatched = false
+        const chunkEntities = (chunk.entities ?? []).map((e) => e.toLowerCase()).filter(Boolean)
         if (chunkEntities.length > 0) {
-          for (const ent of chunkEntities) {
-            if (lowerQuery.includes(ent) || activeEntities.has(ent)) {
-              sEntity = 1.0
-              break
+          for (let idx = 0; idx < chunkEntities.length; idx++) {
+            const ent = chunkEntities[idx]
+            const inQuery = ent.length >= 2 && lowerQuery.includes(ent)
+            const inActive = activeEntities.has(ent)
+            if (inQuery || inActive) {
+              const isGeneric = hasSpecificTarget && GENERIC_STORY_TERMS.has(ent)
+              if (isGeneric) {
+                sEntity = Math.max(sEntity, 0.35)
+              } else {
+                sEntity = 1.0
+                specificMatchedCount++
+                if (idx === 0) {
+                  primaryEntityMatched = true
+                }
+              }
             }
           }
         }
@@ -317,7 +455,14 @@ export class MobileLocalRagEngine {
         if (priorityRank >= 4) sPriority = 0.15
         else if (priorityRank === 3) sPriority = 0.08
         else if (priorityRank === 1) sPriority = -0.05
-        else if (priorityRank === 0) sPriority = -0.30
+        else if (priorityRank === 0) sPriority = -0.35
+
+        if (primaryEntityMatched) {
+          sPriority += 0.14
+        }
+        if (specificMatchedCount >= 2) {
+          sPriority += 0.08 * Math.min(2, specificMatchedCount - 1)
+        }
 
         let timelineMultiplier = 1.0
         if (currentChapter !== undefined && Number.isFinite(currentChapter)) {
@@ -364,9 +509,59 @@ export class MobileLocalRagEngine {
       .filter((r) => r.score > 0.01)
       .sort((a, b) => b.score - a.score)
 
-    // 5. Dedupe by parent ID and return Top K
-    const finalResults = dedupeByParent(scoredCandidates).slice(0, plan.finalTopK)
+    // 4. Dedupe by parent ID and diversify card titles so generic protagonist cards don't monopolize Top K
+    const parentDeduped = dedupeByParent(scoredCandidates)
+    const finalResults: SessionAttachmentSearchResult[] = []
+    const overflowResults: SessionAttachmentSearchResult[] = []
+    const titleCounts = new Map<string, number>()
+
+    for (const item of parentDeduped) {
+      if (finalResults.length >= plan.finalTopK) break
+      const rawSection = item.sectionPath ?? ''
+      const colonIdx = rawSection.indexOf(':')
+      const titleKey = (colonIdx >= 0 ? rawSection.slice(colonIdx + 1) : rawSection).trim().toLowerCase()
+      const maxPerTitle = GENERIC_STORY_TERMS.has(titleKey) ? 1 : 2
+      const count = titleCounts.get(titleKey) ?? 0
+      if (titleKey && count >= maxPerTitle) {
+        overflowResults.push(item)
+        continue
+      }
+      if (titleKey) {
+        titleCounts.set(titleKey, count + 1)
+      }
+      finalResults.push(item)
+    }
+
+    for (const item of overflowResults) {
+      if (finalResults.length >= plan.finalTopK) break
+      finalResults.push(item)
+    }
+
+    this.recordQueryTrace({
+      timestamp: startMs,
+      query: rawQuery,
+      extractedKeywords,
+      currentChapter,
+      activeEntities: storyFilter?.activeEntities ?? [],
+      vectorHitCount: vectorHits.length,
+      keywordHitCount: keywordHits.length,
+      candidateCount: candidateChunkIds.size,
+      durationMs: Date.now() - startMs,
+      topResults: finalResults.slice(0, 5).map((r) => ({
+        parentId: r.parentId,
+        sectionPath: r.sectionPath,
+        score: Number(r.score.toFixed(4)),
+      })),
+    })
+
     return finalResults
+  }
+
+  private recordQueryTrace(trace: MobileRagQueryTrace): void {
+    this.queryTraces.push(trace)
+    if (this.queryTraces.length > 50) {
+      this.queryTraces.shift()
+    }
   }
 
   public async readParents(params: {

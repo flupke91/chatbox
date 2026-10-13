@@ -2,6 +2,7 @@ import type { EmbeddingModel } from 'ai'
 import {
   buildAttachmentChunks,
   buildEmbeddedText,
+  isStoryKbFormat,
   selectAttachmentChunkingPipeline,
 } from '@shared/session-attachment-rag/chunking'
 import type { MobileRagDatabase } from './db'
@@ -17,6 +18,7 @@ import type {
 } from './types'
 
 const BATCH_SIZE = 50
+const STORY_KB_EMBEDDING_THRESHOLD = 500
 
 export interface IndexerDependencies {
   getContent: (storageKey: string) => Promise<string | null | undefined>
@@ -100,13 +102,23 @@ export class MobileRagIndexer {
         return
       }
 
-      const embeddingResolution = await this.deps.resolveEmbeddingProvider()
-      const canResume = await this.isCheckpointResumable(attachment, embeddingResolution.modelString)
+      let embeddingResolution: { provider: EmbeddingModel; modelString: string } | undefined
+      let embeddingError: unknown
+      try {
+        embeddingResolution = await this.deps.resolveEmbeddingProvider()
+      } catch (err) {
+        embeddingError = err
+      }
 
-      if (canResume) {
+      const canResume =
+        embeddingResolution !== undefined
+          ? await this.isCheckpointResumable(attachment, embeddingResolution.modelString)
+          : false
+
+      if (canResume && embeddingResolution) {
         await this.resumeIndexing(attachment, embeddingResolution.provider, embeddingResolution.modelString)
       } else {
-        await this.indexFromScratch(attachment, embeddingResolution.provider, embeddingResolution.modelString)
+        await this.indexFromScratch(attachment, embeddingResolution, embeddingError)
       }
 
       if (this.isCanceled(attachmentId)) {
@@ -130,8 +142,8 @@ export class MobileRagIndexer {
 
   private async indexFromScratch(
     attachment: SessionAttachmentRecord,
-    embeddingModel: EmbeddingModel,
-    embeddingModelString: string
+    embeddingResolution?: { provider: EmbeddingModel; modelString: string },
+    embeddingError?: unknown
   ): Promise<void> {
     const content = await this.deps.getContent(attachment.attachmentStorageKey)
     if (!content?.trim()) {
@@ -144,6 +156,7 @@ export class MobileRagIndexer {
       indexingStage: 'chunking',
     })
 
+    const isStoryKb = isStoryKbFormat(content)
     const { parents, children } = await buildAttachmentChunks(content, attachment.filename)
     if (parents.length === 0 || children.length === 0) {
       throw new Error('Attachment produced no chunks')
@@ -186,6 +199,25 @@ export class MobileRagIndexer {
     const chunkIds = await this.database.replaceParentsAndChunks(attachment.id, parentPayload, chunkPayload)
 
     if (this.isCanceled(attachment.id)) return
+
+    // For large structured Story KBs (>500 cards) or when no embedding provider is configured for a Story KB,
+    // all structured entities, aliases, keywords, chapter orders, and priority ranks are already indexed in SQLite.
+    // Mark ready immediately without blocking mobile for 750+ remote HTTP embedding batches.
+    if (isStoryKb && (!embeddingResolution || children.length > STORY_KB_EMBEDDING_THRESHOLD)) {
+      await this.database.updateAttachmentProgress(attachment.id, {
+        indexingStage: 'finalizing',
+        totalChunks: children.length,
+        embeddedChunks: children.length,
+        embeddingModel: embeddingResolution?.modelString ?? 'story-kb-hybrid-local',
+      })
+      return
+    }
+
+    if (!embeddingResolution) {
+      throw embeddingError ?? new Error('No embedding model configured. Please set an embedding model in settings.')
+    }
+
+    const { provider: embeddingModel, modelString: embeddingModelString } = embeddingResolution
 
     // Embed first chunk to inspect and validate dimension
     const firstChunkText = chunkPayload[0].embeddedText

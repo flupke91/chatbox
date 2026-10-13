@@ -458,5 +458,200 @@ describe('Mobile Hybrid Story RAG Regression Tests', () => {
       expect(results[0].text).toContain('春秋蝉')
       expect(results[0].score).toBeGreaterThan(0.6)
     })
+
+    it('5. Fault-Tolerant No-Embedding Mode: queries and ranks accurately when no embedding provider is configured', async () => {
+      const noEmbedEngine = new MobileLocalRagEngine({
+        database,
+        vectorStore,
+        resolveEmbeddingProvider: vi.fn().mockRejectedValue(new Error('No embedding model configured')),
+      })
+
+      const results = await noEmbedEngine.query({
+        attachmentIds: [attachmentId],
+        query: '方源现在身上有什么厉害的仙蛊？春秋蝉的来历是什么？',
+        plan: {
+          recallTopK: 10,
+          finalTopK: 5,
+          storyFilter: {
+            currentChapter: 1,
+            activeEntities: ['方源'],
+          },
+        },
+      })
+
+      expect(results.length).toBeGreaterThan(0)
+      expect(results[0].text).toContain('春秋蝉')
+      const traces = noEmbedEngine.getQueryTraces()
+      expect(traces.length).toBe(1)
+      expect(traces[0].vectorHitCount).toBe(0)
+      expect(traces[0].keywordHitCount).toBeGreaterThan(0)
+    })
+  })
+
+  it('correctly resolves GUR-MOBILE-CARD-2 5-tuple catalog, chapter_catalog ordinals, relationships/terms/foreshadows/timeline, and filters anchors', async () => {
+    const mobileKbV2Sample = JSON.stringify({
+      format: 'GUR-KB-SINGLE-2.0-COMPACT',
+      manifest: { kb_name: 'gur-canon-kb', card_format: 'GUR-MOBILE-CARD-2' },
+      chapter_catalog: [
+        [0, 'ch1218', '第521节 第五十七章：仙尊悔悟'],
+        [1038, 'ch0001', '第1节 第一章：纵身亡魔心仍不悔'],
+        [1039, 'ch0002', '第2节 第二章：逆光阴五百载清醒'],
+      ],
+      evidence_catalog: [
+        [0, 'ev_001', 1038, '“方源哥哥，你终于醒了！”古月方正惊喜地喊道。'],
+      ],
+      mobile_router: {
+        aliases: {
+          方源: ['古月方源', '大爱仙尊'],
+        },
+      },
+      mobile_card_catalog: [
+        [0, 'ent_fy', 'entity', 4, 1],
+        [1, 'rel_bros', 'relationship', 3, 1],
+        [2, 'term_aperture', 'term', 3, 1],
+        [3, 'fore_wine', 'foreshadow', 3, 1],
+        [4, 'time_awaken', 'timeline_node', 3, 1],
+        [5, 'ent_stub', 'entity', 3, 0],
+        [6, 'item_late', 'item_or_gu', 4, 1],
+      ],
+      entities: [
+        {
+          _id: 'ent_fy',
+          name: '方源',
+          card: '方源：古月山寨少年，五百年魔道巨擘重生。',
+          aliases: ['古月方源'],
+          keys: ['方源', '重生'],
+          ch: [1038],
+          ev: [0],
+        },
+        {
+          _id: 'ent_stub',
+          name: '路人甲',
+          card: '路人甲：路人甲，山寨蛊师。',
+          keys: ['路人甲'],
+          ch: [1038],
+        },
+      ],
+      relationships: [
+        {
+          _id: 'rel_bros',
+          name: '方源 <-> 古月方正 (兄弟)',
+          card: '方源与古月方正是同胞兄弟，古月方正资质甲等，方源丙等。',
+          keys: ['方源', '古月方正', '兄弟'],
+          ch: [1039],
+        },
+      ],
+      terms: [
+        {
+          _id: 'term_aperture',
+          name: '空窍',
+          card: '空窍：蛊师体内储存真元、温养蛊虫的神秘窍穴。',
+          keys: ['空窍', '真元'],
+          ch: [1039],
+        },
+      ],
+      foreshadows: [
+        {
+          _id: 'fore_wine',
+          name: '花酒行者遗藏',
+          card: '青茅山外醉仙翁引出的花酒行者传承伏笔。',
+          keys: ['花酒行者', '酒虫'],
+          ch: [1039],
+        },
+      ],
+      timeline: [
+        {
+          _id: 'time_awaken',
+          name: '青茅山开窍大典',
+          card: '春季开窍大典，少年涉过希望河开启空窍。',
+          keys: ['开窍大典', '希望蛊'],
+          ch: [1039],
+          story_time: '开窍大典',
+        },
+      ],
+      items_and_gu: [
+        {
+          _id: 'item_late',
+          name: '至尊仙胎蛊',
+          card: '至尊仙胎蛊：十转仙蛊，九转亦可炼化成就至尊仙体。',
+          keys: ['至尊仙胎蛊', '仙体'],
+          ch: [0], // ordinal 0 -> ch1218 -> chapter 1218!
+        },
+      ],
+      anchors: [
+        {
+          _id: 'anchor:chapter:ch0001',
+          name: 'ch0001 章节锚点',
+          card: 'ch0001 章节锚点：原文证据定位锚点。',
+          ch: [1038],
+        },
+      ],
+    })
+
+    const result = await buildAttachmentChunks(mobileKbV2Sample, 'gur-kb.mobile.json')
+    // Anchors must be excluded from child chunks
+    expect(result.children.some((c) => c.sectionPath?.includes('章节锚点'))).toBe(false)
+
+    // Chapter ordinal 1038 must map to Chapter 1, NOT 1038!
+    const fyChunk = result.children.find((c) => c.sectionPath === 'entities:方源')
+    expect(fyChunk).toBeDefined()
+    expect(fyChunk?.chapterOrder).toBe(1)
+    expect(fyChunk?.priorityRank).toBe(4)
+    expect(fyChunk?.entities).toContain('古月方源')
+    expect(fyChunk?.entities).toContain('大爱仙尊')
+    expect(fyChunk?.rawText).toContain('【原文印证】')
+    expect(fyChunk?.rawText).toContain('方源哥哥，你终于醒了')
+
+    // Chapter ordinal 0 must map to Chapter 1218, NOT 0!
+    const lateChunk = result.children.find((c) => c.sectionPath === 'items_and_gu:至尊仙胎蛊')
+    expect(lateChunk).toBeDefined()
+    expect(lateChunk?.chapterOrder).toBe(1218)
+
+    // Relationships, terms, foreshadows, timeline must all be indexed
+    expect(result.children.some((c) => c.sectionPath?.startsWith('relationships:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('terms:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('foreshadows:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('timeline:'))).toBe(true)
+
+    // Non-substantive tautological stub must be demoted to priorityRank = 0
+    const stubChunk = result.children.find((c) => c.sectionPath === 'entities:路人甲')
+    expect(stubChunk?.priorityRank).toBe(0)
+  })
+
+  it('verifies real patch/goal/gur-kb(2).json chunking, chapter ordinal mapping, and zero anchor pollution', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const kbPath = path.resolve(process.cwd(), 'patch/goal/gur-kb(2).json')
+    if (!fs.existsSync(kbPath)) {
+      return
+    }
+    const rawKb = fs.readFileSync(kbPath, 'utf-8')
+    expect(isStoryKbFormat(rawKb)).toBe(true)
+
+    const result = chunkStoryKbDocument(rawKb)
+    // Real KB has 40,412 semantic cards across 14 sections (after excluding 10,751 anchors)
+    expect(result.children.length).toBeGreaterThan(38000)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('anchors:'))).toBe(false)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('relationships:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('terms:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('foreshadows:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('conflicts:'))).toBe(true)
+    expect(result.children.some((c) => c.sectionPath?.startsWith('runtime_core:'))).toBe(true)
+
+    // Verify Fang Yuan & Spring Autumn Cicada have chapterOrder = 1 (not 1038!)
+    const fangYuanChunk = result.children.find(
+      (c) => c.sectionPath === 'entities:方源' && c.chapterOrder === 1
+    )
+    expect(fangYuanChunk).toBeDefined()
+    expect(fangYuanChunk?.chapterOrder).toBe(1)
+
+    const cicadaChunk = result.children.find(
+      (c) => c.sectionPath === 'items_and_gu:春秋蝉' && c.chapterOrder !== undefined && (c.priorityRank ?? 0) > 0
+    )
+    expect(cicadaChunk).toBeDefined()
+    expect(cicadaChunk?.chapterOrder).toBe(1)
+    expect(cicadaChunk?.priorityRank).toBeGreaterThan(2)
   })
 })
+
+
