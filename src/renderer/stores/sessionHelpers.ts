@@ -601,20 +601,7 @@ async function analyzePickedAsset(input: {
 }): Promise<AttachmentAnalysis> {
   const { asset, content, parserType, existingTokenCountMap } = input
   const stats = getContentStats(content)
-  const sessionAttachmentWarningReason = isParsedContentVeryLarge(stats)
-    ? SESSION_ATTACHMENT_RAG_LARGE_ATTACHMENT_WARNING
-    : undefined
-  if (sessionAttachmentWarningReason) {
-    log.info(
-      `${SESSION_ATTACHMENT_RAG_LOG_PREFIX} Parsed content is very large: file="${asset.name}", parser=${parserType ?? 'unknown'}, bytes=${stats.byteLength}, limit=${getSessionAttachmentRagMaxByteLength()}`
-    )
-  }
-
   const isSessionAttachmentRagFileType = isSessionAttachmentRagSupportedFilePath(asset.name)
-  const exceedsSessionAttachmentRagThreshold =
-    (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) &&
-    isSessionAttachmentRagFileType &&
-    stats.byteLength > SESSION_ATTACHMENT_RAG_INLINE_BYTE_THRESHOLD
   // Mobile and web story KBs (GUR structured KB) are indexed purely by local SQL keyword/entity
   // retrieval and never call a remote embedding API, so they must not be gated behind a
   // Chatbox license or an embedding model. Without this bypass a multi-megabyte story KB is
@@ -623,6 +610,20 @@ async function analyzePickedAsset(input: {
     (platform.type === 'mobile' || platform.type === 'web') &&
     isSessionAttachmentRagFileType &&
     isStoryKbFormat(content)
+  // A story KB is chunked into a local index rather than inlined, so the "very large attachment"
+  // warning (which talks about consuming points) does not apply and would only mislead the user.
+  const sessionAttachmentWarningReason =
+    !isLocalStoryKb && isParsedContentVeryLarge(stats) ? SESSION_ATTACHMENT_RAG_LARGE_ATTACHMENT_WARNING : undefined
+  if (sessionAttachmentWarningReason) {
+    log.info(
+      `${SESSION_ATTACHMENT_RAG_LOG_PREFIX} Parsed content is very large: file="${asset.name}", parser=${parserType ?? 'unknown'}, bytes=${stats.byteLength}, limit=${getSessionAttachmentRagMaxByteLength()}`
+    )
+  }
+
+  const exceedsSessionAttachmentRagThreshold =
+    (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) &&
+    isSessionAttachmentRagFileType &&
+    stats.byteLength > SESSION_ATTACHMENT_RAG_INLINE_BYTE_THRESHOLD
   if (isLocalStoryKb) {
     log.debug(
       `${SESSION_ATTACHMENT_RAG_LOG_PREFIX} Story KB detected on ${platform.type}: file="${asset.name}", bytes=${stats.byteLength}; bypassing embedding/license capability gate`
