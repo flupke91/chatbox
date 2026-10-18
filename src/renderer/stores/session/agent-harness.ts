@@ -39,6 +39,7 @@ import {
   hasAcceptedCallbackBackgroundTaskResult,
 } from '@/packages/chatbox-cli/background-task-result'
 import { assessContextPressure, getConfiguredContextWindow } from '@/packages/context-management/context-pressure'
+import { injectSessionAttachmentRetrieval } from '@/packages/context-management/session-attachment-retrieval-injection'
 import {
   buildModelSystemPrompt,
   convertToModelMessages,
@@ -311,6 +312,14 @@ export async function prepareAgentGenerationHarness(
     preserveToolCallMessageIds,
     sandboxMode: canExecuteCode,
   })
+
+  // Models without tool-use support never receive the query_session_attachment toolset, so an
+  // indexed (retrieval-mode) attachment would sit in the prompt as an empty FILE_CONTENT and the
+  // knowledge base would silently never be consulted. Run the same local retrieval up front and
+  // inline the hits into the last user turn instead.
+  if (!model.isSupportToolUse('read-file')) {
+    await injectSessionAttachmentRetrieval({ promptMessages: promptMsgs, allMessages: messages })
+  }
 
   // Agent mode owns its identity header: session-level system messages are
   // dropped from the transcript. A Copilot's prompt is frozen into the snapshot
