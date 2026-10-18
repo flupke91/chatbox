@@ -40,6 +40,19 @@
       gtag("js", new Date());
 
       // gtag('config', 'G-B365F44W6E');
+
+      // PWA: serves the app shell for history-routed URLs (refresh / iOS home-screen resume) and
+      // keeps the bundles available offline.
+      if (
+        "serviceWorker" in navigator &&
+        (location.protocol === "https:" ||
+          location.hostname === "localhost" ||
+          location.hostname === "127.0.0.1")
+      ) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("/sw.js").catch(function () {});
+        });
+      }
     </script>
     <script>
       var initialTheme = localStorage.getItem("initial-theme");
