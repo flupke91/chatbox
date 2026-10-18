@@ -42,8 +42,8 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
+        # No `version` input: it must not fight the `packageManager` field in package.json,
+        # which pnpm/action-setup@v4 treats as the authoritative pin.
 
       - name: Get pnpm store directory
         id: pnpm-cache
