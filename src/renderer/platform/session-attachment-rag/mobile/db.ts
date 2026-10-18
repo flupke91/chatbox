@@ -18,6 +18,20 @@ import type {
 
 const DB_NAME = 'chatbox-session-rag'
 
+/**
+ * Machine-generated bookkeeping lines that the story-KB builder emits next to real cards
+ * (`entity_candidate_id:*`, `record_type:*`, `certainty:*`, ...). They score highly on entity
+ * matches but carry no canon content, so retrieval excludes them unless asked otherwise.
+ */
+const METADATA_FRAGMENT_PATTERNS = [
+  '%entity_candidate%',
+  '%record_type:%',
+  '%certainty:%',
+  '%source_refs:%',
+  '%promoted_by:%',
+  '%ord_type:%',
+]
+
 function mapRowToAttachmentRecord(row: Record<string, unknown>): SessionAttachmentRecord {
   return {
     id: Number(row.id),
@@ -111,6 +125,8 @@ export class MobileRagDatabase {
   private sqlite: SQLiteConnection
   private database!: SQLiteDBConnection
   private initPromise: Promise<void> | null = null
+  /** True when the FTS5 trigram index is available (SQLite >= 3.34 with FTS5 compiled in). */
+  private ftsEnabled = false
 
   constructor(sqliteConnection?: SQLiteConnection) {
     this.sqlite = sqliteConnection ?? new SQLiteConnection(CapacitorSQLite)
@@ -129,11 +145,11 @@ export class MobileRagDatabase {
   }
 
   private async openDatabase(): Promise<void> {
-    try {
-      this.sqlite.closeConnection(DB_NAME, false)
-    } catch {
-      // ignore
-    }
+    // closeConnection is async: without awaiting it the rejection ("No available connection
+    // for database ...") escapes the try/catch and surfaces as an unhandled rejection.
+    await Promise.resolve(this.sqlite.closeConnection(DB_NAME, false)).catch(() => {
+      // ignore - connection may not exist yet
+    })
 
     this.database = await this.sqlite.createConnection(DB_NAME, false, 'no-encryption', 1, false)
     await this.database.open()
@@ -229,6 +245,53 @@ export class MobileRagDatabase {
         // Column already exists or table just created with it
       }
     }
+
+    await this.initializeFtsIndex()
+  }
+
+  /**
+   * Build the FTS5 trigram index used for Chinese substring recall.
+   *
+   * A plain `LIKE '%term%'` scan over tens of thousands of chunks costs hundreds of
+   * milliseconds per query on a phone. FTS5 with the trigram tokenizer supports arbitrary
+   * substring matching (which is what CJK needs, since unicode61 would treat a whole
+   * sentence as one token) and lets SQLite walk an index instead.
+   *
+   * The index is external-content, so it stores no duplicate text: it is rebuilt from
+   * session_attachment_chunk. Devices without FTS5/trigram simply keep the LIKE path.
+   */
+  private async initializeFtsIndex(): Promise<void> {
+    try {
+      const existing = await this.database.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_attachment_chunk_fts'"
+      )
+      const alreadyCreated = (existing.values ?? []).length > 0
+      if (!alreadyCreated) {
+        await this.database.execute(`
+          CREATE VIRTUAL TABLE session_attachment_chunk_fts USING fts5(
+            raw_text, section_path, entities, keywords,
+            content='session_attachment_chunk',
+            content_rowid='id',
+            tokenize='trigram'
+          );
+        `)
+      }
+      this.ftsEnabled = true
+      if (!alreadyCreated) {
+        await this.rebuildFtsIndex()
+      }
+    } catch (error) {
+      this.ftsEnabled = false
+      console.warn('FTS5 trigram index unavailable, falling back to LIKE scan', error)
+    }
+  }
+
+  /** Re-index the whole chunk table. Cheap enough to run once per attachment import. */
+  private async rebuildFtsIndex(): Promise<void> {
+    if (!this.ftsEnabled) return
+    await this.database.execute(
+      "INSERT INTO session_attachment_chunk_fts(session_attachment_chunk_fts) VALUES('rebuild')"
+    )
   }
 
   public async cleanupInterruptedIndexingAttachments(): Promise<number> {
@@ -549,6 +612,7 @@ export class MobileRagDatabase {
         'SELECT id FROM session_attachment_chunk WHERE attachment_id = ? ORDER BY chunk_order ASC',
         [attachmentId]
       )
+      await this.rebuildFtsIndex()
       return (chunkRows.values ?? []).map((r) => Number(r.id))
     }
 
@@ -614,6 +678,7 @@ export class MobileRagDatabase {
       chunkIds.push(Number(chunkId))
     }
 
+    await this.rebuildFtsIndex()
     return chunkIds
   }
 
@@ -624,6 +689,10 @@ export class MobileRagDatabase {
       entities?: string[]
       maxChapter?: number
       limit?: number
+      /** Keep chunks with no chapter ordinal when a spoiler ceiling is applied (default: drop them). */
+      includeUnknownChapter?: boolean
+      /** Keep machine-generated metadata stubs in the candidate set (default: drop them). */
+      excludeMetadataFragments?: boolean
     }
   ): Promise<Array<SessionAttachmentChunkRecord & { filename: string; matchScore: number }>> {
     if (attachmentIds.length === 0) return []
@@ -679,12 +748,22 @@ export class MobileRagDatabase {
       )
       .join(' OR ')
 
+    // Trigram tokenizer needs at least three characters per phrase, so shorter terms can only
+    // widen the score, not drive recall. When no term is long enough we keep the LIKE scan.
+    const ftsTerms = this.ftsEnabled ? uniqueTerms.filter((term) => term.length >= 3) : []
+    const useFts = ftsTerms.length > 0
+    const ftsQuery = ftsTerms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' OR ')
+
     let sql = `
       SELECT c.*, a.filename, (${scoreExpressions.join(' + ')}) AS sql_match_score
       FROM session_attachment_chunk c
       JOIN session_attachment a ON c.attachment_id = a.id
       WHERE c.attachment_id IN (${placeholders})
-        AND (${termConditions})
+        AND ${
+          useFts
+            ? 'c.id IN (SELECT rowid FROM session_attachment_chunk_fts WHERE session_attachment_chunk_fts MATCH ?)'
+            : `(${termConditions})`
+        }
     `
     const params: unknown[] = []
     for (const term of uniqueTerms) {
@@ -692,14 +771,30 @@ export class MobileRagDatabase {
       params.push(pattern, pattern, pattern, pattern)
     }
     params.push(...attachmentIds)
-    for (const term of uniqueTerms) {
-      const pattern = `%${term}%`
-      params.push(pattern, pattern, pattern, pattern)
+    if (useFts) {
+      params.push(ftsQuery)
+    } else {
+      for (const term of uniqueTerms) {
+        const pattern = `%${term}%`
+        params.push(pattern, pattern, pattern, pattern)
+      }
     }
 
+    // Cards without a chapter ordinal cannot be proven to sit inside the allowed timeline slice,
+    // so in strict (default) mode they must not slip past the spoiler ceiling. Callers that
+    // intentionally want timeless material (rules, factions) can opt in explicitly.
     if (options.maxChapter !== undefined && Number.isFinite(options.maxChapter)) {
-      sql += ' AND (c.chapter_order IS NULL OR c.chapter_order <= ?)'
+      sql += options.includeUnknownChapter
+        ? ' AND (c.chapter_order IS NULL OR c.chapter_order <= ?)'
+        : ' AND c.chapter_order IS NOT NULL AND c.chapter_order <= ?'
       params.push(options.maxChapter)
+    }
+
+    // Drop raw metadata stubs (entity candidates / provenance lines). They are machine bookkeeping,
+    // not canon content, yet they carry a high priority rank and would otherwise crowd the top-k.
+    if (options.excludeMetadataFragments !== false) {
+      sql += ` AND NOT (${METADATA_FRAGMENT_PATTERNS.map(() => 'c.raw_text LIKE ?').join(' OR ')})`
+      params.push(...METADATA_FRAGMENT_PATTERNS)
     }
 
     const limit = Math.max(1, Math.min(options.limit ?? 50, 100))

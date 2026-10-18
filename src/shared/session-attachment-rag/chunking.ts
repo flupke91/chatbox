@@ -6,6 +6,8 @@
 // because retrieval evals showed they recall well at this size.
 // `tokenEstimate` (length / 4) is preserved for DB metadata only.
 export const PARENT_TARGET_CHARS = 1600 // ≈ 400 tokens
+/** Story-KB cards shorter than this are fragments and get folded into the previous chunk. */
+export const MIN_STORY_KB_CHILD_CHARS = 12
 export const PARENT_HARD_CAP_CHARS = 2400 // ≈ 600 tokens
 export const CHILD_SIZE_CHARS = 448 // ≈ 112 tokens
 export const CHILD_OVERLAP_CHARS = 64 // ≈ 16 tokens
@@ -569,6 +571,8 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
   let currentParentCards: string[] = []
   let currentParentOrder = 0
   let currentSection = ''
+  /** Index of the last emitted child for the parent currently being filled, or -1. */
+  let lastChildIndexInParent = -1
 
   const flushParent = () => {
     if (currentParentCards.length === 0) return
@@ -582,6 +586,7 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
     })
     currentParentOrder++
     currentParentCards = []
+    lastChildIndexInParent = -1
   }
 
   const resolveCardChapterOrder = (card: Record<string, unknown>): number | undefined => {
@@ -673,6 +678,31 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
       }
       currentParentCards.push(cardRepresentation)
 
+      // Cards that are barely a sentence ("成功后无需再次认主。") are useless as standalone
+      // retrieval units but still carry canon detail. Fold them into the previous chunk of the
+      // same section so they stay searchable without polluting the top-k with 10-character hits.
+      const previousChild = lastChildIndexInParent >= 0 ? children[lastChildIndexInParent] : undefined
+      const canMergeIntoPrevious =
+        fullChildText.length < MIN_STORY_KB_CHILD_CHARS &&
+        priorityRank > 0 &&
+        previousChild !== undefined &&
+        previousChild.parentOrder === currentParentOrder &&
+        previousChild.sectionPath?.split(':')[0] === sectionName
+      if (canMergeIntoPrevious && previousChild) {
+        previousChild.rawText = `${previousChild.rawText} ${fullChildText}`
+        previousChild.tokenEstimate += estimateTokenCount(cardText)
+        previousChild.entities = [...new Set([...(previousChild.entities ?? []), ...entities])]
+        previousChild.keywords = [...new Set([...(previousChild.keywords ?? []), ...keys])]
+        if (chapterOrder !== undefined) {
+          previousChild.chapterOrder =
+            previousChild.chapterOrder === undefined
+              ? chapterOrder
+              : Math.min(previousChild.chapterOrder, chapterOrder)
+        }
+        previousChild.priorityRank = Math.max(previousChild.priorityRank ?? 2, priorityRank)
+        continue
+      }
+
       children.push({
         parentOrder: currentParentOrder,
         chunkOrder: children.length,
@@ -695,6 +725,7 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
           risk_categories: card.risk_categories,
         },
       })
+      lastChildIndexInParent = children.length - 1
     }
     flushParent()
   }

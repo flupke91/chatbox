@@ -108,6 +108,7 @@ describe('MobileRagDatabase', () => {
   })
 
   it('reads parents with session isolation checking', async () => {
+    mockDatabase.query.mockResolvedValueOnce({ values: [{ name: 'session_attachment_chunk_fts' }] }) // FTS existence probe
     mockDatabase.query.mockResolvedValueOnce({
       values: [
         {
@@ -143,6 +144,7 @@ describe('MobileRagDatabase', () => {
 
   it('returns accurate debug snapshot', async () => {
     mockDatabase.query
+      .mockResolvedValueOnce({ values: [{ name: 'session_attachment_chunk_fts' }] }) // FTS existence probe
       .mockResolvedValueOnce({ values: [{ cnt: 3 }] }) // attachmentCount
       .mockResolvedValueOnce({ values: [{ cnt: 12 }] }) // parentCount
       .mockResolvedValueOnce({ values: [{ cnt: 45 }] }) // chunkCount
@@ -173,5 +175,64 @@ describe('MobileRagDatabase', () => {
     expect(snapshot.statusCounts.pending).toBe(1)
     expect(snapshot.recentAttachments).toHaveLength(1)
     expect(snapshot.recentAttachments[0].filename).toBe('f1.txt')
+  })
+
+  it('drops chapterless chunks and metadata stubs when a spoiler ceiling is applied', async () => {
+    await ragDb.initialize()
+    mockDatabase.query.mockClear()
+
+    await ragDb.searchKeywordChunks([1], { keywords: ['本命蛊'], maxChapter: 100, limit: 10 })
+
+    const [sql, params] = mockDatabase.query.mock.calls[0]
+    expect(sql).toContain('c.chapter_order IS NOT NULL AND c.chapter_order <= ?')
+    expect(sql).not.toContain('c.chapter_order IS NULL OR')
+    expect(sql).toContain('NOT (c.raw_text LIKE ?')
+    expect(params).toContain('%entity_candidate%')
+    expect(params).toContain(100)
+  })
+
+  it('keeps chapterless chunks when includeUnknownChapter is requested', async () => {
+    await ragDb.initialize()
+    mockDatabase.query.mockClear()
+
+    await ragDb.searchKeywordChunks([1], {
+      keywords: ['本命蛊'],
+      maxChapter: 100,
+      includeUnknownChapter: true,
+      excludeMetadataFragments: false,
+    })
+
+    const [sql] = mockDatabase.query.mock.calls[0]
+    expect(sql).toContain('c.chapter_order IS NULL OR c.chapter_order <= ?')
+    expect(sql).not.toContain('NOT (c.raw_text LIKE ?')
+  })
+
+  it('drives recall through the FTS5 trigram index when it is available', async () => {
+    await ragDb.initialize()
+    mockDatabase.query.mockClear()
+
+    await ragDb.searchKeywordChunks([1], { keywords: ['本命蛊'], limit: 10 })
+
+    const [sql, params] = mockDatabase.query.mock.calls[0]
+    expect(sql).toContain('session_attachment_chunk_fts MATCH ?')
+    expect(params).toContain('"本命蛊"')
+  })
+
+  it('falls back to LIKE recall when FTS5 cannot be created', async () => {
+    mockDatabase.execute.mockImplementation(async (statement: string) => {
+      if (statement.includes('CREATE VIRTUAL TABLE')) {
+        throw new Error('no such module: fts5')
+      }
+      return { changes: { changes: 0 } }
+    })
+    const fallbackDb = new MobileRagDatabase(mockConnection)
+    await fallbackDb.initialize()
+    mockDatabase.query.mockClear()
+
+    await fallbackDb.searchKeywordChunks([1], { keywords: ['本命蛊'], limit: 10 })
+
+    const [sql] = mockDatabase.query.mock.calls[0]
+    expect(sql).toContain('LOWER(c.raw_text) LIKE ?')
+    expect(sql).not.toContain('MATCH')
   })
 })
