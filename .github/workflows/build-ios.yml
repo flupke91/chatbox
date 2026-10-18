@@ -1,0 +1,120 @@
+name: Build iOS App
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'ios/**'
+      - 'capacitor.config.ts'
+      - 'package.json'
+      - '.github/workflows/build-ios.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'ios/**'
+      - 'capacitor.config.ts'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/build-ios.yml'
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      upload_to_release_tag:
+        description: 'Release tag to attach .ipa to (optional, e.g. v1.9.10-rag)'
+        required: false
+        default: ''
+
+jobs:
+  build-ios:
+    name: Build iOS (macOS-14 ARM64)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install Dependencies
+        shell: bash
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build Web Bundle & Sync iOS Project
+        shell: bash
+        env:
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: |
+          pnpm run mobile:sync:ios
+
+      - name: Install CocoaPods
+        shell: bash
+        run: |
+          cd ios/App
+          pod install --repo-update
+
+      - name: Build iOS App Archive (Unsigned)
+        shell: bash
+        run: |
+          cd ios/App
+          set -o pipefail
+          xcodebuild -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath build/App.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package Unsigned .ipa for Sideloading
+        shell: bash
+        run: |
+          cd ios/App/build
+          mkdir -p Payload
+          cp -R App.xcarchive/Products/Applications/App.app Payload/
+          zip -qr Chatbox-iOS-unsigned.ipa Payload
+          zip -qr Chatbox-iOS-App.xcarchive.zip App.xcarchive
+
+      - name: Upload iOS Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatbox-ios-build
+          path: |
+            ios/App/build/Chatbox-iOS-unsigned.ipa
+            ios/App/build/Chatbox-iOS-App.xcarchive.zip
+          retention-days: 14
+
+      - name: Upload .ipa to GitHub Release (Release trigger or specified tag)
+        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_release_tag != '') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name || github.event.inputs.upload_to_release_tag }}"
+          echo "Uploading Chatbox-iOS-unsigned.ipa to Release: ${TAG_NAME}"
+          gh release upload "${TAG_NAME}" ios/App/build/Chatbox-iOS-unsigned.ipa --clobber
