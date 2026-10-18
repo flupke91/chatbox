@@ -23,11 +23,11 @@ export class SQLiteImageGenerationStorage implements ImageGenerationStorage {
   }
 
   private async openDatabase(): Promise<void> {
-    try {
-      this.sqlite.closeConnection(DB_NAME, false)
-    } catch {
+    // closeConnection is async: without awaiting it the rejection ("No available connection
+    // for database ...") escapes the try/catch and surfaces as an unhandled rejection.
+    await Promise.resolve(this.sqlite.closeConnection(DB_NAME, false)).catch(() => {
       // ignore - connection may not exist
-    }
+    })
 
     // Bump version to 2 for new columns
     this.database = await this.sqlite.createConnection(DB_NAME, false, 'no-encryption', 2, false)

@@ -7,6 +7,7 @@ import {
 } from '@chatbox/core/application/attachments'
 import { projectSessionMeta } from '@chatbox/core/application/session'
 import { isSessionAttachmentRagSupportedFilePath, isSupportedFile, isTextFilePath } from '@shared/file-extensions'
+import { isStoryKbFormat } from '@shared/session-attachment-rag/chunking'
 import {
   CHATBOX_AI_PARSER_LICENSE_KEY_REQUIRED_ERROR,
   EMPTY_ATTACHMENT_CONTENT_ERROR,
@@ -614,9 +615,24 @@ async function analyzePickedAsset(input: {
     (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) &&
     isSessionAttachmentRagFileType &&
     stats.byteLength > SESSION_ATTACHMENT_RAG_INLINE_BYTE_THRESHOLD
-  const sessionAttachmentRagAllowed = exceedsSessionAttachmentRagThreshold ? await canUseSessionAttachmentRag() : false
+  // Mobile story KBs (GUR structured KB) are indexed purely by local SQL keyword/entity/alias
+  // retrieval and never call a remote embedding API, so they must not be gated behind a
+  // Chatbox license or an embedding model. Without this bypass a multi-megabyte story KB is
+  // forced into inline mode and rejected as "too much text" on mobile.
+  const isMobileStoryKb =
+    platform.type === 'mobile' && isSessionAttachmentRagFileType && isStoryKbFormat(content)
+  if (isMobileStoryKb) {
+    log.debug(
+      `${SESSION_ATTACHMENT_RAG_LOG_PREFIX} Story KB detected on mobile: file="${asset.name}", bytes=${stats.byteLength}; bypassing embedding/license capability gate`
+    )
+  }
+  const sessionAttachmentRagAllowed = exceedsSessionAttachmentRagThreshold
+    ? isMobileStoryKb || (await canUseSessionAttachmentRag())
+    : false
   const shouldUseSessionAttachmentRag =
-    exceedsSessionAttachmentRagThreshold && sessionAttachmentRagAllowed && !sessionAttachmentWarningReason
+    exceedsSessionAttachmentRagThreshold &&
+    sessionAttachmentRagAllowed &&
+    (isMobileStoryKb || !sessionAttachmentWarningReason)
   const { lineCount, byteLength, tokenCountMap } = computePreviewMetadata(content, existingTokenCountMap, {
     includeFullTokenCounts: !shouldUseSessionAttachmentRag,
     stats,

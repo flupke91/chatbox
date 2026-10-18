@@ -168,6 +168,7 @@ import {
   SESSION_ATTACHMENT_RAG_MAX_PARSED_BYTE_LENGTH,
   SESSION_ATTACHMENT_RAG_REQUIRES_CHATBOX_AI_ERROR,
 } from './sessionHelpers'
+import platform from '@/platform'
 
 function createFile(name: string, content = 'binary-content'): File {
   const file = new File([content], name, { type: 'application/pdf', lastModified: 1700000000000 })
@@ -751,6 +752,52 @@ describe('preprocessFile local parser fallback', () => {
     expect(result.sessionAttachmentAvailability).toBe('allowed')
     expect(result.sessionAttachmentBlockedReason).toBeUndefined()
     expect(result.tokenCountMap?.default).toBe(parsedContent.length)
+  })
+
+  it('uses session retrieval for over-threshold story KBs on mobile even without a Chatbox license', async () => {
+    const file = createFile('gur-kb.json')
+    const parsedContent = `{"format":"GUR-KB-SINGLE-2.0-COMPACT","mobile_card_catalog":[[0,"m000001","entity",3,1]],"padding":"${'a'.repeat(
+      256 * 1024 + 1
+    )}"}`
+    licenseState.key = undefined
+    sessionRagCapabilityState.enabled = false
+    defaultEmbeddingModelState.value = undefined
+    blobStore.set('local-key', parsedContent)
+    mockParseFileLocally.mockResolvedValueOnce({ isSupported: true, key: 'local-key' })
+    const previousType = platform.type
+    platform.type = 'mobile'
+    try {
+      const result = await prepareFileAttachment(file, { provider: '', modelId: '' })
+
+      expect(mockGetSessionRagConfig).not.toHaveBeenCalled()
+      expect(result.error).toBeUndefined()
+      expect(result.ragMode).toBe('session-retrieval')
+      expect(result.sessionAttachmentAvailability).toBe('allowed')
+      expect(result.sessionAttachmentWarningReason).toBeUndefined()
+    } finally {
+      platform.type = previousType
+    }
+  })
+
+  it('keeps over-threshold non-story JSON on mobile inline without a Chatbox license', async () => {
+    const file = createFile('plain.json')
+    const parsedContent = `{"items":["${'a'.repeat(256 * 1024 + 1)}"]}`
+    licenseState.key = undefined
+    sessionRagCapabilityState.enabled = false
+    defaultEmbeddingModelState.value = undefined
+    blobStore.set('local-key', parsedContent)
+    mockParseFileLocally.mockResolvedValueOnce({ isSupported: true, key: 'local-key' })
+    const previousType = platform.type
+    platform.type = 'mobile'
+    try {
+      const result = await prepareFileAttachment(file, { provider: '', modelId: '' })
+
+      expect(result.error).toBeUndefined()
+      expect(result.ragMode).toBe('inline')
+      expect(result.tokenCountMap?.default).toBe(parsedContent.length)
+    } finally {
+      platform.type = previousType
+    }
   })
 
   it('uses session retrieval for over-threshold attachments without a Chatbox license when a default embedding model is configured', async () => {

@@ -106,7 +106,9 @@ class SQLiteStorage {
   private async initialize(): Promise<void> {
     try {
       // reload的时候会报connection already open错误，所以先关闭
-      this.sqlite.closeConnection('chatbox.db', false)
+      await Promise.resolve(this.sqlite.closeConnection('chatbox.db', false)).catch(() => {
+        // 连接可能尚不存在，忽略
+      })
       this.database = await this.sqlite.createConnection('chatbox.db', false, 'no-encryption', 1, false)
 
       // 创建表
