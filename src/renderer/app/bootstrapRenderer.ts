@@ -18,6 +18,7 @@ import { initRecentDirectoriesStore } from '@/stores/recentDirectoriesStore'
 import { initSettingsStore } from '@/stores/settingsStore'
 import { initUpdateListeners } from '@/stores/updateStore'
 import { reportError } from '@/utils/sentry'
+import { installWebTelemetry } from '@/utils/telemetry'
 import type { RendererApplication } from './createRendererApplication'
 
 const log = getLogger('index')
@@ -61,6 +62,10 @@ export async function initializeRenderer(): Promise<void> {
 
 /** Hydrates the application graph and registers post-migration host bindings before React renders. */
 export async function bootstrapRenderer(application: RendererApplication): Promise<Settings> {
+  // Web deployments report failures to their own server (Sentry above only covers upstream);
+  // install before anything else can throw.
+  installWebTelemetry()
+
   const [, settings] = await Promise.all([
     application.bootstrap(),
     initSettingsStore(),

@@ -4,6 +4,7 @@ import * as remote from '@/packages/remote'
 import platform from '@/platform'
 import * as settingActions from '@/stores/settingActions'
 import { settingsStore } from '@/stores/settingsStore'
+import { reportTelemetry } from '@/utils/telemetry'
 import { asRecord, contentOrErrorText, numberField, stringField, toTextModelOutput } from './model-output'
 
 function formatArrayOutput(output: unknown, formatItem: (item: Record<string, unknown>, index: number) => string) {
@@ -146,7 +147,7 @@ export async function getToolSet(attachmentIds: number[]) {
         required: ['query'],
         additionalProperties: false,
       }),
-      execute: (input) => {
+      execute: async (input) => {
         const queryInput = input as {
           query: string
           limit?: number
@@ -162,11 +163,47 @@ export async function getToolSet(attachmentIds: number[]) {
             activeEntities: queryInput.entities,
           }
         }
-        return controller.query({
-          attachmentIds,
-          query: queryInput.query,
-          plan,
-        })
+
+        // Retrieval that quietly returns nothing looks identical to "the KB was never consulted",
+        // so record the shape of every call: hit count, latency, and whether the chapter filter
+        // narrowed it away.
+        const startedAt = Date.now()
+        try {
+          const results = await controller.query({
+            attachmentIds,
+            query: queryInput.query,
+            plan,
+          })
+          reportTelemetry({
+            kind: 'rag_query_result',
+            message: queryInput.query,
+            dedupeKey: `rag_query_result:${queryInput.query}`,
+            context: {
+              hits: Array.isArray(results) ? results.length : -1,
+              ms: Date.now() - startedAt,
+              currentChapter: queryInput.currentChapter,
+              hasStoryFilter: !!plan.storyFilter,
+              attachmentIds,
+              platform: platform.type,
+            },
+          })
+          return results
+        } catch (error) {
+          reportTelemetry({
+            kind: 'rag_query_error',
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+            context: {
+              query: queryInput.query,
+              ms: Date.now() - startedAt,
+              currentChapter: queryInput.currentChapter,
+              attachmentIds,
+              phase: 'tool_query',
+              platform: platform.type,
+            },
+          })
+          throw error
+        }
       },
       toModelOutput: toTextModelOutput(formatSearchResults),
     },

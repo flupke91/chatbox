@@ -22,6 +22,8 @@ import type {
   SessionAttachmentSearchResult,
 } from './types'
 import { SQLiteBlobVectorStore } from './vector-store'
+import platform from '@/platform'
+import { reportTelemetry } from '@/utils/telemetry'
 
 export interface MobileRagQueryTrace {
   timestamp: number
@@ -203,6 +205,12 @@ export class MobileLocalRagEngine {
           await this.indexer.indexAttachment(attachmentId)
         } catch (error) {
           console.warn(`[MobileLocalRagEngine] Failed to index attachment ${attachmentId}:`, error)
+          reportTelemetry({
+            kind: 'rag_index_error',
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+            context: { attachmentId, platform: platform.type },
+          })
         }
       })
       .catch(() => undefined)

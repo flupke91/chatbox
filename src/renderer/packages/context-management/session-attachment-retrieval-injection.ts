@@ -1,5 +1,6 @@
 import type { Message, SessionAttachmentQueryPlan } from '@shared/types'
 import { getLogger } from '@/lib/utils'
+import { reportTelemetry } from '@/utils/telemetry'
 import platform from '@/platform'
 
 const log = getLogger('session-attachment-retrieval')
@@ -116,6 +117,12 @@ export async function injectSessionAttachmentRetrieval(params: {
     }
   } catch (error) {
     log.warn('session attachment retrieval injection failed', error)
+    reportTelemetry({
+      kind: 'rag_query_error',
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { attachmentIds, phase: 'retrieval_injection', platform: platform.type },
+    })
   }
   return { injected: 0 }
 }

@@ -21,6 +21,7 @@ import { BrowserAttachmentAdapter } from '@/adapters/BrowserAttachmentAdapter'
 import { CapacitorAttachmentAdapter } from '@/adapters/CapacitorAttachmentAdapter'
 import { DesktopAttachmentAdapter } from '@/adapters/DesktopAttachmentAdapter'
 import { getLogger } from '@/lib/utils'
+import { reportTelemetry } from '@/utils/telemetry'
 import { PREVIEW_LINES } from '@/packages/context-management/attachment-payload'
 import * as localParser from '@/packages/local-parser'
 import * as remote from '@/packages/remote'
@@ -694,7 +695,19 @@ async function prepareFileAttachmentOnce(
     return { file, ...prepared }
   } catch (error) {
     log.error(`${SESSION_ATTACHMENT_RAG_LOG_PREFIX} Failed to preprocess file "${file.name}":`, error)
-    throw normalizeFilePreprocessFailure(error, 'parse') ?? error
+    const failure = normalizeFilePreprocessFailure(error, 'parse') ?? error
+    reportTelemetry({
+      kind: 'attachment_preprocess_error',
+      message: failure instanceof Error ? failure.message : String(failure),
+      stack: failure instanceof Error ? failure.stack : undefined,
+      context: {
+        fileName: file.name,
+        fileSize: file.size,
+        platform: platform.type,
+        errorCode: failure instanceof FilePreprocessFailure ? failure.code : undefined,
+      },
+    })
+    throw failure
   }
 }
 
