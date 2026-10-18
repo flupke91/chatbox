@@ -7,6 +7,27 @@ import { visualizer } from 'rollup-plugin-visualizer'
 import type { Plugin } from 'vite'
 import packageJson from './release/app/package.json'
 /**
+ * Vite plugin to drop upstream's third-party analytics tags from web builds.
+ *
+ * Both tags are plain `defer` scripts in <head>, and deferred scripts execute in document order
+ * *before* the app's own module entry. When either host is slow or unreachable — gtag and
+ * plausible are both blocked or throttled on many networks — the browser sits on the tag until it
+ * times out, so the entry module never runs and the app stays on the splash screen forever.
+ * Self-hosted deployments do not need them anyway.
+ */
+export function stripThirdPartyAnalytics(): Plugin {
+  const hosts = ['googletagmanager.com', 'plausible']
+  return {
+    name: 'strip-third-party-analytics',
+    transformIndexHtml(html) {
+      return html
+        .replace(/<!-- Google tag \(gtag\.js\) -->\s*/i, '')
+        .replace(/<script\b[\s\S]*?<\/script>\s*/gi, (tag) => (hosts.some((host) => tag.includes(host)) ? '' : tag))
+    },
+  }
+}
+
+/**
  * Vite plugin to inject <base href="/"> for web builds
  * This ensures relative paths resolve correctly for SPA routes like /session/xxx
  */
@@ -263,6 +284,7 @@ export default defineConfig(({ mode }) => {
         injectViewportContent(isDesktop),
         isWeb ? injectBaseTag() : undefined,
         injectReleaseDate(),
+        isWeb ? stripThirdPartyAnalytics() : undefined,
         isWeb ? replacePlausibleDomain() : undefined,
         visualizer({
           filename: 'release/app/dist/renderer/stats.html',
