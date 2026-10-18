@@ -10,10 +10,26 @@ import { getBrowser, getOS } from '../packages/navigator'
 import type { Platform, PlatformType } from './interfaces'
 import type { KnowledgeBaseController } from './knowledge-base/interface'
 import type { SessionAttachmentRagController } from './session-attachment-rag/interface'
+import { WebSessionAttachmentRagController } from './session-attachment-rag/web-controller'
 import { IndexedDBStorage } from './storages'
 import WebExporter from './web_exporter'
 import webLogger from './web_logger'
 import { parseFileLocallyInBrowser } from './web_platform_utils'
+
+/**
+ * Enables the `__sessionAttachmentRag` debug handle (browser-side verification of the local
+ * index). Off by default; turned on for dev builds, `?ragdebug`, or `localStorage.ragdebug=1`.
+ */
+function isSessionAttachmentRagDebugRequested(): boolean {
+  if (import.meta.env.DEV) return true
+  if (typeof window === 'undefined') return false
+  if (new URLSearchParams(window.location.search).has('ragdebug')) return true
+  try {
+    return window.localStorage.getItem('ragdebug') === '1'
+  } catch {
+    return false
+  }
+}
 
 export default class WebPlatform extends IndexedDBStorage implements Platform {
   public type: PlatformType = 'web'
@@ -23,10 +39,16 @@ export default class WebPlatform extends IndexedDBStorage implements Platform {
 
   private imageGenerationStorage: ImageGenerationStorage | null = null
   private sessionMetaStorage: SessionMetaStorage | null = null
+  private sessionAttachmentRagController: SessionAttachmentRagController | null = null
 
   constructor() {
     super()
     webLogger.init().catch((e) => console.error('Failed to init web logger:', e))
+    if (isSessionAttachmentRagDebugRequested()) {
+      // Create the controller up front so tooling can inspect the persisted local index without
+      // having to send a message first. The SQLite file itself still opens lazily.
+      this.getSessionAttachmentRagController()
+    }
   }
 
   public async getVersion(): Promise<string> {
@@ -195,11 +217,19 @@ export default class WebPlatform extends IndexedDBStorage implements Platform {
   }
 
   public getSessionAttachmentRagController(): SessionAttachmentRagController {
-    throw new Error('Session attachment RAG is not implemented on web.')
+    if (!this.sessionAttachmentRagController) {
+      this.sessionAttachmentRagController = new WebSessionAttachmentRagController()
+      if (isSessionAttachmentRagDebugRequested()) {
+        // Debug handle for browser-side verification (indexing progress, retrieval timings).
+        ;(globalThis as Record<string, unknown>).__sessionAttachmentRag = this.sessionAttachmentRagController
+      }
+    }
+    return this.sessionAttachmentRagController
   }
 
   public supportsSessionAttachmentRag(): boolean {
-    return false
+    // The browser runs the same local Story-KB engine on sql.js; retrieval stays on-device.
+    return true
   }
 
   public getImageGenerationStorage(): ImageGenerationStorage {

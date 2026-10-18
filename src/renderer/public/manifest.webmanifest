@@ -1,0 +1,26 @@
+{
+  "name": "Chatbox · 本地知识库版",
+  "short_name": "Chatbox",
+  "description": "多模型 AI 聊天客户端，支持本地知识库检索（Story KB / GUR 格式）",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#242424",
+  "theme_color": "#000000",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/logo192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
