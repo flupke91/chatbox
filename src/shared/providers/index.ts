@@ -5,7 +5,7 @@ import type { Config, ProviderModelInfo, SessionSettings, Settings } from '../ty
 import type { ModelDependencies } from '../types/adapters'
 import { withResolvedModelApiStyle } from './api-style'
 import './builtin-registration'
-import { mergeProviderModelCapabilities } from './model-config'
+import { mergeProviderModelCapabilities, withDefaultToolUseCapability } from './model-config'
 import {
   clearProviderRegistry,
   defineProvider,
@@ -93,7 +93,10 @@ function getModelConfig(settings: SessionSettings, globalSettings: Settings, pro
   // so model instances have accurate data for capability checks.
   // Stamp the resolving provider id so model instances can evaluate reasoning-control
   // support using the same provider+model-id logic as the UI.
-  return { ...enrichModelFromRegistry(model, provider), providerId: provider }
+  return {
+    ...withDefaultToolUseCapability(enrichModelFromRegistry(model, provider), storedModel),
+    providerId: provider,
+  }
 }
 
 /**

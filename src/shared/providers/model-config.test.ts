@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderModelInfo } from '../types'
-import { mergeProviderModelCapabilities } from './model-config'
+import { mergeProviderModelCapabilities, withDefaultToolUseCapability } from './model-config'
 
 describe('mergeProviderModelCapabilities', () => {
   const defaultModel: ProviderModelInfo = {
@@ -43,5 +43,30 @@ describe('mergeProviderModelCapabilities', () => {
     const customModel: ProviderModelInfo = { modelId: 'custom-model', capabilities: ['tool_use'] }
 
     expect(mergeProviderModelCapabilities(customModel, undefined)).toBe(customModel)
+  })
+})
+
+describe('withDefaultToolUseCapability', () => {
+  it('grants tool_use to a model unknown to the registry', () => {
+    expect(withDefaultToolUseCapability({ modelId: 'glm-5.3-flash', type: 'chat' }, undefined)).toEqual({
+      modelId: 'glm-5.3-flash',
+      type: 'chat',
+      capabilities: ['tool_use'],
+    })
+  })
+
+  it('respects an explicit empty capability list as an opt-out', () => {
+    const stored: ProviderModelInfo = { modelId: 'glm-5.3-flash', capabilities: [] }
+    expect(withDefaultToolUseCapability({ modelId: 'glm-5.3-flash', capabilities: [] }, stored).capabilities).toEqual([])
+  })
+
+  it('does not overwrite capabilities resolved from the registry', () => {
+    const model: ProviderModelInfo = { modelId: 'gpt-4o', capabilities: ['vision'] }
+    expect(withDefaultToolUseCapability(model, undefined).capabilities).toEqual(['vision'])
+  })
+
+  it('does not grant tool_use to embedding or rerank models', () => {
+    expect(withDefaultToolUseCapability({ modelId: 'text-embedding-3-small', type: 'embedding' }, undefined).capabilities)
+      .toBeUndefined()
   })
 })
