@@ -3,7 +3,9 @@ import {
   buildAttachmentChunks,
   buildEmbeddedText,
   chunkPlainDocument,
+  chunkStoryKbDocument,
   chunkStructuredDocument,
+  pickEvidenceQuote,
   selectAttachmentChunkingPipeline,
 } from './chunking'
 
@@ -76,5 +78,34 @@ Spring Autumn Cicada is his vital Gu worm, allowing him to reverse time and be r
 
     const plainResult = await buildAttachmentChunks(content, 'test.txt')
     expect(plainResult.parents.length).toBeGreaterThan(0)
+  })
+})
+
+describe('story KB evidence quotes', () => {
+  it('never returns a pointer as a quote', () => {
+    // Documented layout: [chapter_id, type_code, quote, micro_ref, extra_ref]
+    expect(pickEvidenceQuote(['ch0001', 'Q', '他站在山门前没有动。', 'micro:a1', null])).toBe(
+      '他站在山门前没有动。'
+    )
+    // Pointer-only row (P type) must yield nothing rather than "ev:p3".
+    expect(pickEvidenceQuote(['ch0002', 'P', null, 'micro:a2', 'ev:p3'])).toBe('')
+    // Legacy builders wrote the quote at index 4; keep that working.
+    expect(pickEvidenceQuote(['ch0003', 'Q', null, 'micro:a3', '雨还没停。'])).toBe('雨还没停。')
+  })
+
+  it('appends the quote at index 2 to the child text', () => {
+    const kb = {
+      mobile_card_catalog: [[0, 'm000001', 'entity', 3, 1]],
+      entities: [{ _id: 'm000001', name: '方源', card: '少年蛊师，先算后动。', ev: [0, 1] }],
+      evidence_catalog: [
+        ['ch0001', 'Q', '他站在山门前没有动。', 'micro:a1', null],
+        ['ch0002', 'P', null, 'micro:a2', 'ev:p3'],
+      ],
+    }
+    const result = chunkStoryKbDocument(JSON.stringify(kb))
+    expect(result.children).toHaveLength(1)
+    expect(result.children[0]!.rawText).toContain('他站在山门前没有动。')
+    expect(result.children[0]!.rawText).not.toContain('micro:a2')
+    expect(result.children[0]!.rawText).not.toContain('ev:p3')
   })
 })

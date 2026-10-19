@@ -454,6 +454,35 @@ function isSubstantiveStoryCard(name: string, cardText: string, explicitSubstant
   return true
 }
 
+/**
+ * Pointer-shaped values ("micro:a1", "ch0001", "ev:7") are locations, not quotes.
+ * Writing one into the child text as 原文印证 makes the model read an id where a
+ * sentence should be, and it also eats the 448-char child budget.
+ */
+const EVIDENCE_POINTER_PATTERN = /^(?:micro|macro|ev|evidence|quote|ref|src|ch|anchor|card|m\d)[:：]?[\w:.-]*$/i
+
+function looksLikeEvidencePointer(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > 32) return false
+  return EVIDENCE_POINTER_PATTERN.test(trimmed)
+}
+
+/**
+ * Evidence rows are `[chapter_id, type_code, quote, micro_ref, extra_ref]`, so the
+ * verbatim quote lives at index 2. Older builders wrote it at 4 or 3; keep those
+ * as fallbacks, but never surface a bare pointer as a quote.
+ */
+export function pickEvidenceQuote(row: unknown[]): string {
+  for (const index of [2, 4, 3]) {
+    const value = row[index]
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (!trimmed || looksLikeEvidencePointer(trimmed)) continue
+    return trimmed
+  }
+  return ''
+}
+
 export function chunkStoryKbDocument(content: string): AttachmentChunkingResult {
   const data = JSON.parse(content)
   const catalog = data.mobile_card_catalog as Array<unknown[]> | undefined
@@ -658,7 +687,7 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
         for (const evOrd of card.ev.slice(0, 2)) {
           const evEntry = evidenceCatalog[Number(evOrd)]
           if (Array.isArray(evEntry)) {
-            const quoteStr = typeof evEntry[4] === 'string' ? evEntry[4] : typeof evEntry[3] === 'string' ? evEntry[3] : ''
+            const quoteStr = pickEvidenceQuote(evEntry)
             if (quoteStr.trim()) {
               quotes.push(quoteStr.trim())
             }
