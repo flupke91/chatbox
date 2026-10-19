@@ -415,32 +415,48 @@ export class MobileLocalRagEngine {
     let vectorHits: Array<{ chunkId: number; attachmentId: number; score: number }> = []
     let vectorUsed = false
     let vectorError: string | undefined
-    try {
-      const { provider } = await this.resolveEmbedding()
-      const embeddings = await this.embedValues(provider, [rawQuery])
-      const queryVector = embeddings[0]
-      if (Array.isArray(queryVector) && queryVector.length > 0) {
-        vectorHits = await this.vectorStore.query({
-          attachmentIds: readyIds,
-          queryVector,
-          topK: recallLimit,
-        })
-        vectorUsed = true
-      } else {
-        vectorError = 'empty query vector'
+    // A story KB above the indexing threshold has no vectors at all. Embedding the
+    // query anyway costs a provider round-trip per question and can only return
+    // nothing, so skip it when none of the ready attachments carries a vector index.
+    let anyVectorIndex = false
+    for (const id of readyIds) {
+      if (await this.vectorStore.hasAttachmentVectorIndex(id)) {
+        anyVectorIndex = true
+        break
       }
-    } catch (error) {
-      // Fault-tolerant fallback: when no embedding model is configured or offline,
-      // rely on hybrid structured keyword + entity + metadata retrieval.
-      // The reason is kept on the trace, otherwise "vector produced no hits" and
-      // "vector never ran" look identical in the debug snapshot.
-      vectorError = error instanceof Error ? error.message : String(error)
-      reportTelemetry({
-        kind: 'rag_vector_error',
-        message: vectorError,
-        context: { attachmentIds: readyIds.length, platform: platform.type },
-      })
-      vectorHits = []
+    }
+    if (!anyVectorIndex) {
+      // Not an error: a story KB above the embedding threshold is lexical-only by
+      // design, so skip the provider round-trip and say why on the trace.
+      vectorError = 'skipped: no vector index (lexical-only attachment)'
+    } else {
+      try {
+        const { provider } = await this.resolveEmbedding()
+        const embeddings = await this.embedValues(provider, [rawQuery])
+        const queryVector = embeddings[0]
+        if (Array.isArray(queryVector) && queryVector.length > 0) {
+          vectorHits = await this.vectorStore.query({
+            attachmentIds: readyIds,
+            queryVector,
+            topK: recallLimit,
+          })
+          vectorUsed = true
+        } else {
+          vectorError = 'empty query vector'
+        }
+      } catch (error) {
+        // Fault-tolerant fallback: when no embedding model is configured or offline,
+        // rely on hybrid structured keyword + entity + metadata retrieval.
+        // The reason is kept on the trace, otherwise "vector produced no hits" and
+        // "vector never ran" look identical in the debug snapshot.
+        vectorError = error instanceof Error ? error.message : String(error)
+        reportTelemetry({
+          kind: 'rag_vector_error',
+          message: vectorError,
+          context: { attachmentIds: readyIds.length, platform: platform.type },
+        })
+        vectorHits = []
+      }
     }
 
     const keywordHits = await this.database.searchKeywordChunks(readyIds, {
