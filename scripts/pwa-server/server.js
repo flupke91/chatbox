@@ -136,6 +136,7 @@ function buildRecord(body, req) {
     'rag_index_error',
     'rag_query_error',
     'rag_query_result',
+    'rag_vector_error',
   ]
   const kind = allowed.includes(body.kind) ? body.kind : 'other'
   let context
