@@ -157,7 +157,23 @@ export class MobileRagIndexer {
     })
 
     const isStoryKb = isStoryKbFormat(content)
+    // Import cost is dominated by three stages that fail in completely different
+    // ways (parse, chunk, SQLite). Log each one so a slow import can be diagnosed
+    // from a single line instead of guesswork.
+    const timing = { parseMs: 0, chunkMs: 0, insertMs: 0, bytes: content.length }
+    const startedAt = Date.now()
+    if (isStoryKb) {
+      const t0 = Date.now()
+      try {
+        JSON.parse(content)
+      } catch {
+        // chunking below will surface the real error
+      }
+      timing.parseMs = Date.now() - t0
+    }
+    const chunkStart = Date.now()
     const { parents, children } = await buildAttachmentChunks(content, attachment.filename)
+    timing.chunkMs = Date.now() - chunkStart
     if (parents.length === 0 || children.length === 0) {
       throw new Error('Attachment produced no chunks')
     }
@@ -196,7 +212,15 @@ export class MobileRagIndexer {
       metadata: c.metadata,
     }))
 
+    const insertStart = Date.now()
     const chunkIds = await this.database.replaceParentsAndChunks(attachment.id, parentPayload, chunkPayload)
+    timing.insertMs = Date.now() - insertStart
+    console.info(
+      `[MobileRagIndexer] import timing attachment=${attachment.id} storyKb=${isStoryKb} ` +
+        `bytes=${timing.bytes} parents=${parents.length} children=${children.length} ` +
+        `parse=${timing.parseMs}ms chunk=${timing.chunkMs}ms insertFts=${timing.insertMs}ms ` +
+        `total=${Date.now() - startedAt}ms`
+    )
 
     if (this.isCanceled(attachment.id)) return
 
