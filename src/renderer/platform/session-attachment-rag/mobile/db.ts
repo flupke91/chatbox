@@ -780,6 +780,13 @@ export class MobileRagDatabase {
       }
     }
 
+    // Drop raw metadata stubs (entity candidates / provenance lines). They are machine bookkeeping,
+    // not canon content, yet they carry a high priority rank and would otherwise crowd the top-k.
+    if (options.excludeMetadataFragments !== false) {
+      sql += ` AND NOT (${METADATA_FRAGMENT_PATTERNS.map(() => 'c.raw_text LIKE ?').join(' OR ')})`
+      params.push(...METADATA_FRAGMENT_PATTERNS)
+    }
+
     // Cards without a chapter ordinal cannot be proven to sit inside the allowed timeline slice,
     // so in strict (default) mode they must not slip past the spoiler ceiling. Callers that
     // intentionally want timeless material (rules, factions) can opt in explicitly.
@@ -788,13 +795,6 @@ export class MobileRagDatabase {
         ? ' AND (c.chapter_order IS NULL OR c.chapter_order <= ?)'
         : ' AND c.chapter_order IS NOT NULL AND c.chapter_order <= ?'
       params.push(options.maxChapter)
-    }
-
-    // Drop raw metadata stubs (entity candidates / provenance lines). They are machine bookkeeping,
-    // not canon content, yet they carry a high priority rank and would otherwise crowd the top-k.
-    if (options.excludeMetadataFragments !== false) {
-      sql += ` AND NOT (${METADATA_FRAGMENT_PATTERNS.map(() => 'c.raw_text LIKE ?').join(' OR ')})`
-      params.push(...METADATA_FRAGMENT_PATTERNS)
     }
 
     const limit = Math.max(1, Math.min(options.limit ?? 50, 100))

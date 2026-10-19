@@ -71,6 +71,43 @@ const GENERIC_STORY_TERMS = new Set([
   '仙尊', '魔尊', '尊者', '名号', '底蕴', '流派', '境界', '功法', '能力',
 ])
 
+/**
+ * Score factor for a chunk whose chapter is unknown while a spoiler ceiling is
+ * active. Low enough to lose to a card we can place on the timeline, high enough
+ * that timeless lore still surfaces when nothing else matches.
+ */
+const UNKNOWN_CHAPTER_MULTIPLIER = 0.3
+/** Chunks past the spoiler ceiling are kept but almost never surface. */
+const FUTURE_CHAPTER_MULTIPLIER = 0.05
+/** A card set in the chapter the player is currently in wins ties. */
+const SAME_CHAPTER_BONUS = 0.1
+
+/**
+ * How much a chunk's chapter position should influence its score.
+ * - no ceiling: no adjustment
+ * - unknown chapter: kept, but at UNKNOWN_CHAPTER_MULTIPLIER (timeless lore)
+ * - after the ceiling: heavily suppressed, not dropped
+ * - exactly the ceiling chapter: small bonus
+ */
+export function resolveTimelineFactor(
+  chapterOrder: number | undefined,
+  currentChapter: number | undefined
+): { multiplier: number; priorityBonus: number } {
+  if (currentChapter === undefined || !Number.isFinite(currentChapter)) {
+    return { multiplier: 1, priorityBonus: 0 }
+  }
+  if (chapterOrder === undefined) {
+    return { multiplier: UNKNOWN_CHAPTER_MULTIPLIER, priorityBonus: 0 }
+  }
+  if (chapterOrder > currentChapter) {
+    return { multiplier: FUTURE_CHAPTER_MULTIPLIER, priorityBonus: 0 }
+  }
+  if (chapterOrder === currentChapter) {
+    return { multiplier: 1, priorityBonus: SAME_CHAPTER_BONUS }
+  }
+  return { multiplier: 1, priorityBonus: 0 }
+}
+
 export function extractQueryKeywords(query: string): string[] {
   const highPriorityTerms: string[] = []
   const standardTerms: string[] = []
@@ -411,6 +448,11 @@ export class MobileLocalRagEngine {
       entities: storyFilter?.activeEntities ?? [],
       maxChapter: currentChapter,
       limit: recallLimit,
+      // Cards without a chapter ordinal are usually timeless lore (a rule, a
+      // faction, a term) rather than future plot. Dropping them outright made a
+      // spoiler ceiling hide 8.8% of a real KB, so keep them and pay for the
+      // uncertainty in the timeline multiplier below.
+      includeUnknownChapter: true,
     })
 
     const candidateChunkIds = new Set<number>()
@@ -491,16 +533,9 @@ export class MobileLocalRagEngine {
           sPriority += 0.08 * Math.min(2, specificMatchedCount - 1)
         }
 
-        let timelineMultiplier = 1.0
-        if (currentChapter !== undefined && Number.isFinite(currentChapter)) {
-          if (chunk.chapterOrder !== undefined) {
-            if (chunk.chapterOrder > currentChapter) {
-              timelineMultiplier = 0.05
-            } else if (chunk.chapterOrder === currentChapter) {
-              sPriority += 0.10
-            }
-          }
-        }
+        const timeline = resolveTimelineFactor(chunk.chapterOrder, currentChapter)
+        const timelineMultiplier = timeline.multiplier
+        sPriority += timeline.priorityBonus
 
         if (currentTime && chunk.storyTime) {
           if (chunk.storyTime.includes(currentTime)) {
