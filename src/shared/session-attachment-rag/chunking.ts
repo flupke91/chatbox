@@ -12,6 +12,12 @@ export const PARENT_HARD_CAP_CHARS = 2400 // ≈ 600 tokens
 export const CHILD_SIZE_CHARS = 448 // ≈ 112 tokens
 export const CHILD_OVERLAP_CHARS = 64 // ≈ 16 tokens
 export const PLAIN_PARENT_OVERLAP_CHARS = 0
+/**
+ * A parent block is handed back to the model whole, without any spoiler filter, so
+ * its cards must stay inside one chapter window. 50 chapters keeps a parent
+ * temporally coherent for a 2000+ chapter novel without fragmenting it per card.
+ */
+export const DEFAULT_PARENT_CHAPTER_SPAN = 50
 
 export interface ParentBlock {
   parentOrder: number
@@ -485,6 +491,9 @@ export function pickEvidenceQuote(row: unknown[]): string {
 
 export function chunkStoryKbDocument(content: string): AttachmentChunkingResult {
   const data = JSON.parse(content)
+  const configuredSpan = Number((data as { manifest?: { parent_chapter_span?: unknown } }).manifest?.parent_chapter_span)
+  const parentChapterSpan =
+    Number.isFinite(configuredSpan) && configuredSpan >= 1 ? configuredSpan : DEFAULT_PARENT_CHAPTER_SPAN
   const catalog = data.mobile_card_catalog as Array<unknown[]> | undefined
   const catalogMap = new Map<string, { kind: string; priorityRank: number; substantive: boolean; ordinal?: number }>()
   const ordinalToCardId = new Map<number, string>()
@@ -600,6 +609,9 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
   let currentParentCards: string[] = []
   let currentParentOrder = 0
   let currentSection = ''
+  /** Chapter window of the parent being filled, if any card carried one. */
+  let currentParentChapterMin: number | undefined
+  let currentParentChapterMax: number | undefined
   /** Index of the last emitted child for the parent currently being filled, or -1. */
   let lastChildIndexInParent = -1
 
@@ -615,6 +627,8 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
     })
     currentParentOrder++
     currentParentCards = []
+    currentParentChapterMin = undefined
+    currentParentChapterMax = undefined
     lastChildIndexInParent = -1
   }
 
@@ -702,10 +716,28 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
       const chapterLabel = chapterOrder !== undefined ? ` [第${chapterOrder}章]` : ''
       const fullChildText = `${cardText}${quoteSuffix}`
       const cardRepresentation = `[${kind}: ${id}] ${name}${aliasLabel}${chapterLabel}\n${fullChildText}`
-      if (currentParentCards.join('\n\n').length + cardRepresentation.length > PARENT_TARGET_CHARS) {
+      // read_session_attachment_parents returns a parent block verbatim and applies no
+      // spoiler ceiling, so cards far apart in the story must never share a parent.
+      // Bound min..max, not distance from the first card: sections are rarely
+      // chapter-sorted, and oscillating around the first card would otherwise
+      // stretch one parent across twice the bucket.
+      // A KB can tighten the bucket through manifest.parent_chapter_span.
+      const spansTooFar =
+        chapterOrder !== undefined &&
+        currentParentChapterMin !== undefined &&
+        currentParentChapterMax !== undefined &&
+        Math.max(currentParentChapterMax, chapterOrder) - Math.min(currentParentChapterMin, chapterOrder) >=
+          parentChapterSpan
+      if (spansTooFar || currentParentCards.join('\n\n').length + cardRepresentation.length > PARENT_TARGET_CHARS) {
         flushParent()
       }
       currentParentCards.push(cardRepresentation)
+      if (chapterOrder !== undefined) {
+        currentParentChapterMin =
+          currentParentChapterMin === undefined ? chapterOrder : Math.min(currentParentChapterMin, chapterOrder)
+        currentParentChapterMax =
+          currentParentChapterMax === undefined ? chapterOrder : Math.max(currentParentChapterMax, chapterOrder)
+      }
 
       // Cards that are barely a sentence ("成功后无需再次认主。") are useless as standalone
       // retrieval units but still carry canon detail. Fold them into the previous chunk of the

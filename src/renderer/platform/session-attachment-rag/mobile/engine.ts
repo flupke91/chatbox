@@ -31,6 +31,10 @@ export interface MobileRagQueryTrace {
   extractedKeywords: string[]
   currentChapter?: number
   activeEntities: string[]
+  /** True when the embedding call succeeded, even if it returned zero hits. */
+  vectorUsed: boolean
+  /** Why the vector path was skipped or failed; absent when it ran normally. */
+  vectorError?: string
   vectorHitCount: number
   keywordHitCount: number
   candidateCount: number
@@ -372,6 +376,8 @@ export class MobileLocalRagEngine {
     // 1. Multi-source recall (30-50 candidates) with fault-tolerant Vector Search
     const recallLimit = Math.max(plan.recallTopK, 35)
     let vectorHits: Array<{ chunkId: number; attachmentId: number; score: number }> = []
+    let vectorUsed = false
+    let vectorError: string | undefined
     try {
       const { provider } = await this.resolveEmbedding()
       const embeddings = await this.embedValues(provider, [rawQuery])
@@ -382,10 +388,21 @@ export class MobileLocalRagEngine {
           queryVector,
           topK: recallLimit,
         })
+        vectorUsed = true
+      } else {
+        vectorError = 'empty query vector'
       }
-    } catch {
+    } catch (error) {
       // Fault-tolerant fallback: when no embedding model is configured or offline,
       // rely on hybrid structured keyword + entity + metadata retrieval.
+      // The reason is kept on the trace, otherwise "vector produced no hits" and
+      // "vector never ran" look identical in the debug snapshot.
+      vectorError = error instanceof Error ? error.message : String(error)
+      reportTelemetry({
+        kind: 'rag_vector_error',
+        message: vectorError,
+        context: { attachmentIds: readyIds.length, platform: platform.type },
+      })
       vectorHits = []
     }
 
@@ -407,6 +424,8 @@ export class MobileLocalRagEngine {
         extractedKeywords,
         currentChapter,
         activeEntities: storyFilter?.activeEntities ?? [],
+        vectorUsed,
+        vectorError,
         vectorHitCount: vectorHits.length,
         keywordHitCount: keywordHits.length,
         candidateCount: 0,
@@ -551,6 +570,8 @@ export class MobileLocalRagEngine {
       extractedKeywords,
       currentChapter,
       activeEntities: storyFilter?.activeEntities ?? [],
+      vectorUsed,
+      vectorError,
       vectorHitCount: vectorHits.length,
       keywordHitCount: keywordHits.length,
       candidateCount: candidateChunkIds.size,

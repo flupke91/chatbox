@@ -109,3 +109,37 @@ describe('story KB evidence quotes', () => {
     expect(result.children[0]!.rawText).not.toContain('ev:p3')
   })
 })
+
+describe('story KB parent chapter buckets', () => {
+  const buildKb = (span?: number) => ({
+    ...(span === undefined ? {} : { manifest: { parent_chapter_span: span } }),
+    mobile_card_catalog: [
+      [0, 'm1', 'entity', 3, 1],
+      [1, 'm2', 'entity', 3, 1],
+      [2, 'm3', 'entity', 3, 1],
+    ],
+    chapter_catalog: [
+      [0, 'ch0001', 1],
+      [1, 'ch0002', 2],
+      [2, 'ch0900', 900],
+    ],
+    entities: [
+      { _id: 'm1', name: '甲', card: '第一章的卡片正文，写得足够长以免被折叠处理。', ch: [0] },
+      { _id: 'm2', name: '乙', card: '第二章的卡片正文，写得足够长以免被折叠处理。', ch: [1] },
+      { _id: 'm3', name: '丙', card: '第九百章的卡片正文，写得足够长以免被折叠处理。', ch: [2] },
+    ],
+  })
+
+  it('breaks a parent when the chapter span reaches the bucket', () => {
+    const result = chunkStoryKbDocument(JSON.stringify(buildKb()))
+    expect(result.children).toHaveLength(3)
+    expect(result.children[0]!.parentOrder).toBe(result.children[1]!.parentOrder)
+    expect(result.children[2]!.parentOrder).toBeGreaterThan(result.children[1]!.parentOrder)
+    expect(result.parents).toHaveLength(2)
+  })
+
+  it('honours manifest.parent_chapter_span', () => {
+    const result = chunkStoryKbDocument(JSON.stringify(buildKb(1)))
+    expect(result.parents).toHaveLength(3)
+  })
+})

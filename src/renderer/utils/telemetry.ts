@@ -16,6 +16,7 @@ type TelemetryKind =
   | 'rag_index_error'
   | 'rag_query_error'
   | 'rag_query_result'
+  | 'rag_vector_error'
 
 interface TelemetryPayload {
   kind: TelemetryKind
