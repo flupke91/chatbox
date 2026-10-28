@@ -108,6 +108,26 @@ export function resolveTimelineFactor(
   return { multiplier: 1, priorityBonus: 0 }
 }
 
+/**
+ * A state snapshot is only valid inside [validFrom, validTo]. Profiles and
+ * events are not phase-bound; with no current chapter we cannot prove a
+ * snapshot is out of range, so keep it and let the timeline factor decide.
+ */
+export function isStateVisibleAtChapter(
+  stateKind: string | undefined,
+  validFrom: number | undefined,
+  validTo: number | undefined,
+  currentChapter: number | undefined
+): boolean {
+  if (currentChapter === undefined) return true
+  // Only phase-bound records are filtered. Profiles, events, claims and rules
+  // remain available as background; item cards evolve by chapter and are phase-bound.
+  if (stateKind !== 'snapshot' && stateKind !== 'item_state' && stateKind !== 'relationship') return true
+  if (validFrom !== undefined && validFrom > currentChapter) return false
+  if (validTo !== undefined && validTo < currentChapter) return false
+  return true
+}
+
 export function extractQueryKeywords(query: string): string[] {
   const highPriorityTerms: string[] = []
   const standardTerms: string[] = []
@@ -495,6 +515,15 @@ export class MobileLocalRagEngine {
 
     // 2. Fetch candidate chunk details
     const chunks = await this.database.listChunksWithDetails(Array.from(candidateChunkIds))
+    // A state snapshot is only valid inside its phase. The SQL ceiling already drops
+    // future chapters; this also drops expired snapshots so an old "白家寨三转"
+    // cannot outrank the current "影宗蛊仙" when the player is past the transition.
+    const timelineChunks =
+      currentChapter === undefined
+        ? chunks
+        : chunks.filter((chunk) =>
+            isStateVisibleAtChapter(chunk.stateKind, chunk.validFrom, chunk.validTo, currentChapter)
+          )
     const vectorHitMap = new Map(vectorHits.map((h) => [h.chunkId, h.score]))
     const keywordHitMap = new Map(keywordHits.map((h) => [h.id, h.matchScore]))
 
@@ -505,7 +534,7 @@ export class MobileLocalRagEngine {
       Array.from(activeEntities).some((e) => !GENERIC_STORY_TERMS.has(e))
 
     // 3. Hybrid Scoring & Timeline/State Filtering
-    const scoredCandidates = chunks
+    const scoredCandidates = timelineChunks
       .map((chunk) => {
         const rawVectorScore = vectorHitMap.get(chunk.id) ?? 0
         const sVec = Math.max(0, Math.min(1, rawVectorScore))

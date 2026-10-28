@@ -114,6 +114,9 @@ function mapRowToChunkRecord(row: Record<string, unknown>): SessionAttachmentChu
     keywords: parseJsonArray(row.keywords),
     chapterOrder: row.chapter_order !== null && row.chapter_order !== undefined ? Number(row.chapter_order) : undefined,
     storyTime: row.story_time ? String(row.story_time) : undefined,
+    stateKind: row.state_kind ? String(row.state_kind) : undefined,
+    validFrom: row.valid_from !== null && row.valid_from !== undefined ? Number(row.valid_from) : undefined,
+    validTo: row.valid_to !== null && row.valid_to !== undefined ? Number(row.valid_to) : undefined,
     priorityRank: row.priority_rank !== null && row.priority_rank !== undefined ? Number(row.priority_rank) : 2,
     kind: row.kind ? String(row.kind) : undefined,
     metadata: parseJsonObject(row.metadata),
@@ -206,6 +209,9 @@ export class MobileRagDatabase {
         keywords TEXT,
         chapter_order INTEGER,
         story_time TEXT,
+        state_kind TEXT,
+        valid_from INTEGER,
+        valid_to INTEGER,
         priority_rank INTEGER DEFAULT 2,
         kind TEXT,
         metadata TEXT,
@@ -234,6 +240,9 @@ export class MobileRagDatabase {
       { name: 'keywords', type: 'TEXT' },
       { name: 'chapter_order', type: 'INTEGER' },
       { name: 'story_time', type: 'TEXT' },
+      { name: 'state_kind', type: 'TEXT' },
+      { name: 'valid_from', type: 'INTEGER' },
+      { name: 'valid_to', type: 'INTEGER' },
       { name: 'priority_rank', type: 'INTEGER DEFAULT 2' },
       { name: 'kind', type: 'TEXT' },
       { name: 'metadata', type: 'TEXT' },
@@ -522,6 +531,9 @@ export class MobileRagDatabase {
       keywords?: string[]
       chapterOrder?: number
       storyTime?: string
+      stateKind?: string
+      validFrom?: number
+      validTo?: number
       priorityRank?: number
       kind?: string
       metadata?: Record<string, unknown>
@@ -583,8 +595,8 @@ export class MobileRagDatabase {
             statement: `INSERT INTO session_attachment_chunk (
               attachment_id, parent_id, chunk_order, section_path,
               page_start, page_end, raw_text, embedded_text, token_estimate,
-              entities, keywords, chapter_order, story_time, priority_rank, kind, metadata, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              entities, keywords, chapter_order, story_time, state_kind, valid_from, valid_to, priority_rank, kind, metadata, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             values: [
               attachmentId,
               parentId,
@@ -599,6 +611,9 @@ export class MobileRagDatabase {
               keywordsJson,
               c.chapterOrder ?? null,
               c.storyTime ?? null,
+              c.stateKind ?? null,
+              c.validFrom ?? null,
+              c.validTo ?? null,
               c.priorityRank ?? 2,
               c.kind ?? null,
               metadataJson,
@@ -652,8 +667,8 @@ export class MobileRagDatabase {
         `INSERT INTO session_attachment_chunk (
           attachment_id, parent_id, chunk_order, section_path,
           page_start, page_end, raw_text, embedded_text, token_estimate,
-          entities, keywords, chapter_order, story_time, priority_rank, kind, metadata, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          entities, keywords, chapter_order, story_time, state_kind, valid_from, valid_to, priority_rank, kind, metadata, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           attachmentId,
           parentId,
@@ -668,6 +683,9 @@ export class MobileRagDatabase {
           keywordsJson,
           c.chapterOrder ?? null,
           c.storyTime ?? null,
+          c.stateKind ?? null,
+          c.validFrom ?? null,
+          c.validTo ?? null,
           c.priorityRank ?? 2,
           c.kind ?? null,
           metadataJson,

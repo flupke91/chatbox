@@ -37,6 +37,9 @@ export interface ChildChunk {
   keywords?: string[]
   chapterOrder?: number
   storyTime?: string
+  stateKind?: string
+  validFrom?: number
+  validTo?: number
   priorityRank?: number
   kind?: string
   metadata?: Record<string, unknown>
@@ -694,6 +697,9 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
       const entities = [...new Set([name, ...mergedAliases, ...rawKeys].filter(Boolean))]
       const chapterOrder = resolveCardChapterOrder(card as Record<string, unknown>)
       const storyTime = typeof card.story_time === 'string' ? card.story_time : undefined
+      const stateKind = typeof card.state_kind === 'string' ? card.state_kind : undefined
+      const validFrom = Number.isFinite(Number(card.valid_from)) ? Number(card.valid_from) : undefined
+      const validTo = Number.isFinite(Number(card.valid_to)) ? Number(card.valid_to) : undefined
 
       let quoteSuffix = ''
       if (evidenceCatalog && Array.isArray(card.ev) && substantive) {
@@ -774,6 +780,9 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
         keywords: keys,
         chapterOrder,
         storyTime,
+        stateKind,
+        validFrom,
+        validTo,
         priorityRank,
         kind,
         metadata: {

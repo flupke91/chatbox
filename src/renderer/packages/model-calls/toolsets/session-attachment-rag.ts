@@ -132,7 +132,8 @@ export async function getToolSet(attachmentIds: number[]) {
           },
           currentChapter: {
             type: 'integer',
-            description: 'Optional current story chapter number (to filter out future events and spoilers)',
+            description:
+              'Current story chapter number. Always pass it when playing a story: it hard-filters future chapters and expired state snapshots.',
           },
           currentTime: {
             type: 'string',

@@ -53,6 +53,9 @@ export interface SessionAttachmentChunkRecord {
   keywords?: string[]
   chapterOrder?: number
   storyTime?: string
+  stateKind?: string
+  validFrom?: number
+  validTo?: number
   priorityRank?: number
   kind?: string
   metadata?: Record<string, unknown>
