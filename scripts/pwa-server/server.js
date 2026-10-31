@@ -329,8 +329,14 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res)
 })
 
-resolveDataDir()
-ensureDataDir()
+// Bind first, prepare telemetry second: a slow or read-only data directory must
+// never decide whether the site answers at all.
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[pwa-server] listening on ${PORT}, telemetry -> ${DATA_DIR}`)
+  try {
+    resolveDataDir()
+    ensureDataDir()
+  } catch (error) {
+    console.error('[pwa-server] telemetry init failed:', error && error.message)
+  }
 })
