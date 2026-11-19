@@ -51,14 +51,14 @@
 
 | 平台 | 下载与安装方式 | 说明 |
 | :--- | :--- | :--- |
-| **Android** | [📱 点击下载 Android 安装包 (APK)](https://github.com/flupke91/chatbox/releases/download/v1.9.8-rag/Chatbox-mobile-rag-debug.apk) | 支持 Android 8.0 及以上系统，已集成状态栏避让与本地向量数据库。 |
+| **Android** | [📱 点击下载 Android 安装包 (APK)](https://github.com/flupke91/chatbox/releases/download/v1.9.13-rag/chatbox-debug-20261028.apk) | 支持 Android 8.0 及以上系统，已集成状态栏避让与本地向量数据库（正式签名 Release APK 见 `v1.9.10-rag` / Releases 页面）。 |
 | **iOS** | [🍏 查看 iOS 工程源码目录](./ios) | 支持 iOS 14.0+。克隆本项目后，在 macOS 终端执行 `npx cap open ios` 即可在 Xcode 中运行。 |
 
 ### 💻 桌面端（Windows / macOS / Linux）
 
 | 操作系统 | 下载文件 | 架构支持 |
 | :--- | :--- | :--- |
-| **Windows** | [💻 Windows 安装包 (.exe)](https://github.com/flupke91/chatbox/releases/download/v1.9.8-rag/Chatbox-1.23.5-Setup.exe) | 64位 Windows 10 / 11 |
+| **Windows** | [💻 前往 Releases 页面查看](https://github.com/flupke91/chatbox/releases) | 64位 Windows 10 / 11 |
 | **macOS** | [前往 Releases 页面查看](https://github.com/flupke91/chatbox/releases) | Intel & Apple Silicon (M系列) |
 | **Linux** | [前往 Releases 页面查看](https://github.com/flupke91/chatbox/releases) | AppImage / deb |
 
@@ -186,7 +186,7 @@ pnpm run package
 
 - 📖 **[移动端本地向量 RAG 项目白皮书与架构总结 (Markdown)](./chatbox_mobile_vector_rag_project.md)**
 - 📑 **[项目技术白皮书 (Word .docx 格式)](./chatbox_mobile_vector_rag_project.docx)**
-- 📜 **[更新日志与变更记录](./CHANGELOG.md)**
+- 📜 **[GitHub Releases 更新日志](https://github.com/flupke91/chatbox/releases)**
 
 ---
 
