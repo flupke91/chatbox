@@ -13,7 +13,10 @@ import {
 } from '@shared/types'
 import dayjs from 'dayjs'
 import { getDefaultStore } from 'jotai'
-import { difference, intersection, keyBy, uniq } from 'lodash'
+import difference from 'lodash/difference'
+import intersection from 'lodash/intersection'
+import keyBy from 'lodash/keyBy'
+import uniq from 'lodash/uniq'
 import oldStore from 'store'
 import { v4 as uuidv4 } from 'uuid'
 import {

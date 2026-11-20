@@ -32,7 +32,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { useAtom, useAtomValue } from 'jotai'
-import { pick } from 'lodash'
+import pick from 'lodash/pick'
 import type React from 'react'
 import {
   forwardRef,

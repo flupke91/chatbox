@@ -43,7 +43,7 @@ import {
   IconX,
 } from '@tabler/icons-react'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { uniq } from 'lodash'
+import uniq from 'lodash/uniq'
 import { type ChangeEvent, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createModelDependencies } from '@/adapters'

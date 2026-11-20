@@ -1,4 +1,4 @@
-import { cloneDeep } from 'lodash'
+import cloneDeep from 'lodash/cloneDeep'
 import { useCallback, useEffect, useState } from 'react'
 import { BUILTIN_MCP_SERVERS, getBuiltinServerConfig } from '@/packages/mcp/builtin'
 import { mcpController } from '@/packages/mcp/controller'

@@ -7,14 +7,19 @@ const getSessionRagConfigMock = vi.fn()
 const getLicenseKeyMock = vi.fn()
 const getSettingsMock = vi.fn()
 
-vi.mock('@/platform', () => ({
-  default: {
+const { platformMock } = vi.hoisted(() => ({
+  platformMock: {
+    type: 'desktop' as 'desktop' | 'mobile' | 'web',
     getSessionAttachmentRagController: () => ({
       getAttachments: getAttachmentsMock,
       query: queryMock,
       readParents: readParentsMock,
     }),
   },
+}))
+
+vi.mock('@/platform', () => ({
+  default: platformMock,
 }))
 
 vi.mock('@/packages/remote', () => ({
@@ -41,6 +46,7 @@ async function toModelOutput(tool: unknown, output: unknown) {
 describe('session attachment RAG toolset', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    platformMock.type = 'desktop'
     getAttachmentsMock.mockResolvedValue([
       {
         id: 1,
@@ -162,5 +168,29 @@ describe('session attachment RAG toolset', () => {
       type: 'text',
       value: 'Parent block 1\nAttachment: large.pdf\nSection: Appendix\nPages: 10-12\nText:\nLarger parent block.',
     })
+  })
+
+  test('skips remote getSessionRagConfig when licenseKey is empty even without defaultRerankModel', async () => {
+    getSettingsMock.mockReturnValue({})
+    getLicenseKeyMock.mockReturnValue(undefined)
+    const { getToolSet } = await import('./session-attachment-rag')
+    await getToolSet([1])
+    expect(getSessionRagConfigMock).not.toHaveBeenCalled()
+  })
+
+  test('skips remote getSessionRagConfig on mobile and web even with licenseKey', async () => {
+    getSettingsMock.mockReturnValue({})
+    getLicenseKeyMock.mockReturnValue('lic-123')
+    const { getToolSet } = await import('./session-attachment-rag')
+
+    platformMock.type = 'mobile'
+    await getToolSet([1])
+    platformMock.type = 'web'
+    await getToolSet([1])
+    expect(getSessionRagConfigMock).not.toHaveBeenCalled()
+
+    platformMock.type = 'desktop'
+    await getToolSet([1])
+    expect(getSessionRagConfigMock).toHaveBeenCalledTimes(1)
   })
 })

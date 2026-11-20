@@ -12,7 +12,7 @@ import {
 import { StreamableHTTPClientTransport as LegacyHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { type JSONValue as AIToolJSONValue, dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import Emittery from 'emittery'
-import { isEqual } from 'lodash'
+import isEqual from 'lodash/isEqual'
 import { IPCStdioTransport } from './ipc-stdio-transport'
 import { MCPOAuthProvider } from './oauth-provider'
 import type { MCPProtocolMode, MCPServerConfig, MCPServerStatus } from './types'

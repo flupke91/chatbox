@@ -51,7 +51,8 @@
 
 | 平台 | 下载与安装方式 | 说明 |
 | :--- | :--- | :--- |
-| **Android** | [📱 点击下载 Android 安装包 (APK)](https://github.com/flupke91/chatbox/releases/download/v1.9.13-rag/chatbox-debug-20261028.apk) | 支持 Android 8.0 及以上系统，已集成状态栏避让与本地向量数据库（正式签名 Release APK 见 `v1.9.10-rag` / Releases 页面）。 |
+| **Android** | [📱 点击下载 Android Release 安装包 (APK)](https://github.com/flupke91/chatbox/releases/download/v1.9.14-rag/Chatbox-v1.9.14-rag-release.apk) | `v1.9.14-rag` 正式签名 Release APK（32.75 MiB，支持 Android 8.0+），含端侧倒排索引、状态快照防剧透过滤与包体瘦身。 |
+| **《蛊真人》配套资产** | [📚 精校知识库 v2 (14.21 MiB)](https://github.com/flupke91/chatbox/releases/download/v1.9.14-rag/gur-kb-chatbox-v2.json) · [🎮 控制器 Prompt v4](https://github.com/flupke91/chatbox/releases/download/v1.9.14-rag/gur-ai-story-game-prompt-chatbox-v4.md) | 2,337/2,337 全书覆盖、33,684 卡、25,704 条 100% 原文验证引文；Prompt v4 原生适配 `query_session_attachment(currentChapter, entities)`。 |
 | **iOS** | [🍏 查看 iOS 工程源码目录](./ios) | 支持 iOS 14.0+。克隆本项目后，在 macOS 终端执行 `npx cap open ios` 即可在 Xcode 中运行。 |
 
 ### 💻 桌面端（Windows / macOS / Linux）

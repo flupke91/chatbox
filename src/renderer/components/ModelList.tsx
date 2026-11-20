@@ -13,7 +13,7 @@ import {
   IconSettings,
   IconTool,
 } from '@tabler/icons-react'
-import { capitalize } from 'lodash'
+import capitalize from 'lodash/capitalize'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { AppTooltip as Tooltip } from '@/components/ui/tooltip'

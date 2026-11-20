@@ -42,16 +42,33 @@
       // gtag('config', 'G-B365F44W6E');
 
       // PWA: serves the app shell for history-routed URLs (refresh / iOS home-screen resume) and
-      // keeps the bundles available offline.
-      if (
-        "serviceWorker" in navigator &&
-        (location.protocol === "https:" ||
+      // keeps the bundles available offline. Native Capacitor shells (Android/iOS) must never
+      // register /sw.js (Capacitor Android serves on https://localhost, which otherwise matches);
+      // proactively unregister any stale registrations left over from older APKs.
+      var isNativeCapacitor = Boolean(
+        window.Capacitor &&
+          typeof window.Capacitor.isNativePlatform === "function" &&
+          window.Capacitor.isNativePlatform()
+      );
+      if ("serviceWorker" in navigator) {
+        if (isNativeCapacitor) {
+          navigator.serviceWorker
+            .getRegistrations()
+            .then(function (regs) {
+              regs.forEach(function (reg) {
+                reg.unregister().catch(function () {});
+              });
+            })
+            .catch(function () {});
+        } else if (
+          location.protocol === "https:" ||
           location.hostname === "localhost" ||
-          location.hostname === "127.0.0.1")
-      ) {
-        window.addEventListener("load", function () {
-          navigator.serviceWorker.register("/sw.js").catch(function () {});
-        });
+          location.hostname === "127.0.0.1"
+        ) {
+          window.addEventListener("load", function () {
+            navigator.serviceWorker.register("/sw.js").catch(function () {});
+          });
+        }
       }
     </script>
     <script>

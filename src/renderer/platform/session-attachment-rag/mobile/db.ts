@@ -124,12 +124,42 @@ function mapRowToChunkRecord(row: Record<string, unknown>): SessionAttachmentChu
   }
 }
 
+function extractIndexableTerms(chunk: {
+  sectionPath?: string
+  entities?: string[]
+  keywords?: string[]
+}): string[] {
+  const terms = new Set<string>()
+  const add = (raw?: string) => {
+    if (!raw) return
+    const clean = raw.trim().toLowerCase()
+    if (clean.length >= 2 && clean.length <= 24) {
+      terms.add(clean)
+    }
+  }
+  if (chunk.entities) {
+    for (const e of chunk.entities) add(e)
+  }
+  if (chunk.keywords) {
+    for (const k of chunk.keywords) add(k)
+  }
+  if (chunk.sectionPath) {
+    const colonIdx = chunk.sectionPath.indexOf(':')
+    if (colonIdx >= 0) {
+      add(chunk.sectionPath.slice(colonIdx + 1))
+    }
+  }
+  return Array.from(terms)
+}
+
 export class MobileRagDatabase {
   private sqlite: SQLiteConnection
   private database!: SQLiteDBConnection
   private initPromise: Promise<void> | null = null
   /** True when the FTS5 trigram index is available (SQLite >= 3.34 with FTS5 compiled in). */
   private ftsEnabled = false
+  /** True when the inverted term table has indexed terms for O(log N) 2-char and non-FTS5 recall. */
+  private hasTermIndex = false
 
   constructor(sqliteConnection?: SQLiteConnection) {
     this.sqlite = sqliteConnection ?? new SQLiteConnection(CapacitorSQLite)
@@ -156,6 +186,13 @@ export class MobileRagDatabase {
 
     this.database = await this.sqlite.createConnection(DB_NAME, false, 'no-encryption', 1, false)
     await this.database.open()
+
+    // Enable WAL & relaxed fsync so bulk imports (90+ batches) do not block on synchronous disk flushes.
+    try {
+      await this.database.execute('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;')
+    } catch {
+      // Some web/mock drivers ignore or reject WAL PRAGMAs cleanly.
+    }
 
     await this.database.execute(`
       CREATE TABLE IF NOT EXISTS session_attachment (
@@ -224,6 +261,12 @@ export class MobileRagDatabase {
         vector TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS session_attachment_term (
+        attachment_id INTEGER NOT NULL,
+        term TEXT NOT NULL,
+        chunk_id INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_sa_session_id ON session_attachment(session_id);
       CREATE INDEX IF NOT EXISTS idx_sa_message_id ON session_attachment(message_id);
       CREATE INDEX IF NOT EXISTS idx_sa_status ON session_attachment(status);
@@ -232,7 +275,10 @@ export class MobileRagDatabase {
       CREATE INDEX IF NOT EXISTS idx_sac_parent_id ON session_attachment_chunk(parent_id);
       CREATE INDEX IF NOT EXISTS idx_sac_chapter ON session_attachment_chunk(attachment_id, chapter_order);
       CREATE INDEX IF NOT EXISTS idx_sac_priority ON session_attachment_chunk(attachment_id, priority_rank);
+      CREATE INDEX IF NOT EXISTS idx_sac_state_window ON session_attachment_chunk(attachment_id, state_kind, valid_from, valid_to);
       CREATE INDEX IF NOT EXISTS idx_sav_attachment_id ON session_attachment_vector(attachment_id);
+      CREATE INDEX IF NOT EXISTS idx_sat_att_term ON session_attachment_term(attachment_id, term);
+      CREATE INDEX IF NOT EXISTS idx_sat_chunk_id ON session_attachment_term(chunk_id);
     `)
 
     const colsToAdd: Array<{ name: string; type: string }> = [
@@ -247,15 +293,107 @@ export class MobileRagDatabase {
       { name: 'kind', type: 'TEXT' },
       { name: 'metadata', type: 'TEXT' },
     ]
-    for (const col of colsToAdd) {
-      try {
-        await this.database.execute(`ALTER TABLE session_attachment_chunk ADD COLUMN ${col.name} ${col.type};`)
-      } catch {
-        // Column already exists or table just created with it
+    try {
+      const tableInfo = await this.database.query('PRAGMA table_info(session_attachment_chunk)')
+      const rows = tableInfo.values ?? []
+      if (rows.length > 0) {
+        const existingCols = new Set(rows.map((r) => String(r.name)))
+        for (const col of colsToAdd) {
+          if (!existingCols.has(col.name)) {
+            await this.database.execute(`ALTER TABLE session_attachment_chunk ADD COLUMN ${col.name} ${col.type};`)
+          }
+        }
       }
+    } catch {
+      // Ignore schema inspection errors on mocked drivers
     }
 
     await this.initializeFtsIndex()
+    await this.initializeTermIndex()
+  }
+
+  private async initializeTermIndex(): Promise<void> {
+    try {
+      const existingTerm = await this.database.query('SELECT 1 FROM session_attachment_term LIMIT 1')
+      if ((existingTerm.values ?? []).length > 0) {
+        this.hasTermIndex = true
+        return
+      }
+      const existingChunks = await this.database.query(
+        "SELECT 1 FROM session_attachment_chunk WHERE (entities IS NOT NULL AND entities != '') OR (keywords IS NOT NULL AND keywords != '') LIMIT 1"
+      )
+      if ((existingChunks.values ?? []).length > 0) {
+        await this.backfillTermIndex()
+      }
+    } catch {
+      this.hasTermIndex = false
+    }
+  }
+
+  private async backfillTermIndex(): Promise<void> {
+    const PAGE = 500
+    let lastId = 0
+    let insertedAny = false
+    while (true) {
+      const res = await this.database.query(
+        'SELECT id, attachment_id, section_path, entities, keywords FROM session_attachment_chunk WHERE id > ? ORDER BY id ASC LIMIT ?',
+        [lastId, PAGE]
+      )
+      const rows = res.values ?? []
+      if (rows.length === 0) break
+      lastId = Number(rows[rows.length - 1].id)
+      const entries: Array<{ attachmentId: number; term: string; chunkId: number }> = []
+      for (const row of rows) {
+        const chunkId = Number(row.id)
+        const attachmentId = Number(row.attachment_id)
+        const terms = extractIndexableTerms({
+          sectionPath: row.section_path ? String(row.section_path) : undefined,
+          entities: parseJsonArray(row.entities),
+          keywords: parseJsonArray(row.keywords),
+        })
+        for (const term of terms) {
+          entries.push({ attachmentId, term, chunkId })
+        }
+      }
+      if (entries.length > 0) {
+        await this.insertTermEntries(entries)
+        insertedAny = true
+      }
+      if (rows.length < PAGE) break
+    }
+    if (insertedAny) {
+      this.hasTermIndex = true
+    }
+  }
+
+  private async insertTermEntries(
+    entries: Array<{ attachmentId: number; term: string; chunkId: number }>
+  ): Promise<void> {
+    if (entries.length === 0) return
+    // Multi-row INSERT keeps variables <= 300 per statement (well below SQLite's 999 limit)
+    // while slashing Capacitor/sql.js bridge round-trips by 100x.
+    const ROWS_PER_STMT = 100
+    const STMTS_PER_SET = 50
+    const statements: capSQLiteSet[] = []
+    for (let i = 0; i < entries.length; i += ROWS_PER_STMT) {
+      const slice = entries.slice(i, i + ROWS_PER_STMT)
+      const placeholders = slice.map(() => '(?, ?, ?)').join(',')
+      const values: unknown[] = []
+      for (const e of slice) {
+        values.push(e.attachmentId, e.term, e.chunkId)
+      }
+      statements.push({
+        statement: `INSERT INTO session_attachment_term (attachment_id, term, chunk_id) VALUES ${placeholders}`,
+        values,
+      })
+      if (statements.length >= STMTS_PER_SET) {
+        await this.database.executeSet(statements.splice(0, statements.length))
+      }
+    }
+    if (statements.length > 0) {
+      await this.database.executeSet(statements)
+    }
+    this.hasTermIndex = true
   }
 
   /**
@@ -475,15 +613,19 @@ export class MobileRagDatabase {
     )
   }
 
-  public async deleteAttachment(attachmentId: number): Promise<void> {
+  public async deleteAttachment(attachmentId: number, options?: { skipFtsRebuild?: boolean }): Promise<void> {
     await this.initialize()
     const set: capSQLiteSet[] = [
+      { statement: 'DELETE FROM session_attachment_term WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment_vector WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment_chunk WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment_parent WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment WHERE id = ?', values: [attachmentId] },
     ]
     await this.database.executeSet(set)
+    if (!options?.skipFtsRebuild) {
+      await this.rebuildFtsIndex()
+    }
   }
 
   public async deleteMessageAttachments(messageId: string): Promise<number[]> {
@@ -491,7 +633,10 @@ export class MobileRagDatabase {
     const rows = await this.database.query('SELECT id FROM session_attachment WHERE message_id = ?', [messageId])
     const ids = (rows.values ?? []).map((r) => Number(r.id))
     for (const id of ids) {
-      await this.deleteAttachment(id)
+      await this.deleteAttachment(id, { skipFtsRebuild: true })
+    }
+    if (ids.length > 0) {
+      await this.rebuildFtsIndex()
     }
     return ids
   }
@@ -501,7 +646,10 @@ export class MobileRagDatabase {
     const rows = await this.database.query('SELECT id FROM session_attachment WHERE session_id = ?', [sessionId])
     const ids = (rows.values ?? []).map((r) => Number(r.id))
     for (const id of ids) {
-      await this.deleteAttachment(id)
+      await this.deleteAttachment(id, { skipFtsRebuild: true })
+    }
+    if (ids.length > 0) {
+      await this.rebuildFtsIndex()
     }
     return ids
   }
@@ -542,8 +690,9 @@ export class MobileRagDatabase {
     await this.initialize()
     const now = Date.now()
 
-    // Clean previous parent/chunk/vector records for this attachment
+    // Clean previous parent/chunk/vector/term records for this attachment
     await this.database.executeSet([
+      { statement: 'DELETE FROM session_attachment_term WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment_vector WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment_chunk WHERE attachment_id = ?', values: [attachmentId] },
       { statement: 'DELETE FROM session_attachment_parent WHERE attachment_id = ?', values: [attachmentId] },
@@ -627,8 +776,10 @@ export class MobileRagDatabase {
         'SELECT id FROM session_attachment_chunk WHERE attachment_id = ? ORDER BY chunk_order ASC',
         [attachmentId]
       )
+      const chunkIds = (chunkRows.values ?? []).map((r) => Number(r.id))
+      await this.insertTermsForChunks(attachmentId, children, chunkIds)
       await this.rebuildFtsIndex()
-      return (chunkRows.values ?? []).map((r) => Number(r.id))
+      return chunkIds
     }
 
     // Insert parents individually to get their generated IDs (small attachments & unit tests)
@@ -696,8 +847,31 @@ export class MobileRagDatabase {
       chunkIds.push(Number(chunkId))
     }
 
+    await this.insertTermsForChunks(attachmentId, children, chunkIds)
     await this.rebuildFtsIndex()
     return chunkIds
+  }
+
+  private async insertTermsForChunks(
+    attachmentId: number,
+    children: Array<{ sectionPath?: string; entities?: string[]; keywords?: string[] }>,
+    chunkIds: number[]
+  ): Promise<void> {
+    if (chunkIds.length === 0 || chunkIds.length !== children.length) return
+    const batch: Array<{ attachmentId: number; term: string; chunkId: number }> = []
+    for (let i = 0; i < children.length; i++) {
+      const chunkId = chunkIds[i]
+      const terms = extractIndexableTerms(children[i])
+      for (const term of terms) {
+        batch.push({ attachmentId, term, chunkId })
+      }
+      if (batch.length >= 5000) {
+        await this.insertTermEntries(batch.splice(0, batch.length))
+      }
+    }
+    if (batch.length > 0) {
+      await this.insertTermEntries(batch)
+    }
   }
 
   public async searchKeywordChunks(
@@ -767,59 +941,105 @@ export class MobileRagDatabase {
       .join(' OR ')
 
     // Trigram tokenizer needs at least three characters per phrase, so shorter terms can only
-    // widen the score, not drive recall. When no term is long enough we keep the LIKE scan.
+    // widen the score — UNLESS we unite them with the indexed term lookup for exact 2-char
+    // entities (e.g. "方正", "酒虫", "红莲"). When no FTS term exists and the inverted term
+    // index is populated, query the term index first before falling back to a full LIKE scan.
     const ftsTerms = this.ftsEnabled ? uniqueTerms.filter((term) => term.length >= 3) : []
+    const shortTerms = uniqueTerms.filter((term) => term.length === 2)
     const useFts = ftsTerms.length > 0
     const ftsQuery = ftsTerms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' OR ')
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 100))
 
-    let sql = `
-      SELECT c.*, a.filename, (${scoreExpressions.join(' + ')}) AS sql_match_score
-      FROM session_attachment_chunk c
-      JOIN session_attachment a ON c.attachment_id = a.id
-      WHERE c.attachment_id IN (${placeholders})
-        AND ${
-          useFts
-            ? 'c.id IN (SELECT rowid FROM session_attachment_chunk_fts WHERE session_attachment_chunk_fts MATCH ?)'
-            : `(${termConditions})`
+    const runRecallQuery = async (
+      mode: 'fts' | 'fts_plus_short_terms' | 'terms' | 'like'
+    ): Promise<Record<string, unknown>[]> => {
+      let recallPredicate: string
+      const predicateParams: unknown[] = []
+      if (mode === 'fts') {
+        recallPredicate = 'c.id IN (SELECT rowid FROM session_attachment_chunk_fts WHERE session_attachment_chunk_fts MATCH ?)'
+        predicateParams.push(ftsQuery)
+      } else if (mode === 'fts_plus_short_terms') {
+        const shortPlaceholders = shortTerms.map(() => '?').join(',')
+        recallPredicate = `(c.id IN (SELECT rowid FROM session_attachment_chunk_fts WHERE session_attachment_chunk_fts MATCH ?) OR c.id IN (SELECT chunk_id FROM session_attachment_term WHERE attachment_id IN (${placeholders}) AND term IN (${shortPlaceholders})))`
+        predicateParams.push(ftsQuery, ...attachmentIds, ...shortTerms)
+      } else if (mode === 'terms') {
+        const termPlaceholders = uniqueTerms.map(() => '?').join(',')
+        recallPredicate = `c.id IN (SELECT chunk_id FROM session_attachment_term WHERE attachment_id IN (${placeholders}) AND term IN (${termPlaceholders}))`
+        predicateParams.push(...attachmentIds, ...uniqueTerms)
+      } else {
+        recallPredicate = `(${termConditions})`
+        for (const term of uniqueTerms) {
+          const pattern = `%${term}%`
+          predicateParams.push(pattern, pattern, pattern, pattern)
         }
-    `
-    const params: unknown[] = []
-    for (const term of uniqueTerms) {
-      const pattern = `%${term}%`
-      params.push(pattern, pattern, pattern, pattern)
-    }
-    params.push(...attachmentIds)
-    if (useFts) {
-      params.push(ftsQuery)
-    } else {
+      }
+
+      let sql = `
+        SELECT c.*, a.filename, (${scoreExpressions.join(' + ')}) AS sql_match_score
+        FROM session_attachment_chunk c
+        JOIN session_attachment a ON c.attachment_id = a.id
+        WHERE c.attachment_id IN (${placeholders})
+          AND ${recallPredicate}
+      `
+      const params: unknown[] = []
       for (const term of uniqueTerms) {
         const pattern = `%${term}%`
         params.push(pattern, pattern, pattern, pattern)
       }
+      params.push(...attachmentIds, ...predicateParams)
+
+      // Drop raw metadata stubs (entity candidates / provenance lines). They are machine bookkeeping,
+      // not canon content, yet they carry a high priority rank and would otherwise crowd the top-k.
+      if (options.excludeMetadataFragments !== false) {
+        sql += ` AND NOT (${METADATA_FRAGMENT_PATTERNS.map(() => 'c.raw_text LIKE ?').join(' OR ')})`
+        params.push(...METADATA_FRAGMENT_PATTERNS)
+      }
+
+      // Push both the upper chapter ceiling AND phase-bound snapshot [valid_from, valid_to]
+      // filtering into SQL so expired snapshots cannot monopolize the pre-LIMIT candidate window.
+      if (options.maxChapter !== undefined && Number.isFinite(options.maxChapter)) {
+        sql += options.includeUnknownChapter
+          ? ' AND (c.chapter_order IS NULL OR c.chapter_order <= ?)'
+          : ' AND c.chapter_order IS NOT NULL AND c.chapter_order <= ?'
+        params.push(options.maxChapter)
+
+        sql += ` AND (
+          c.state_kind IS NULL
+          OR c.state_kind NOT IN ('snapshot', 'item_state', 'relationship')
+          OR (
+            (c.valid_from IS NULL OR c.valid_from <= ?)
+            AND (c.valid_to IS NULL OR c.valid_to >= ?)
+          )
+        )`
+        params.push(options.maxChapter, options.maxChapter)
+      }
+
+      sql += ` ORDER BY CASE WHEN c.priority_rank = 0 THEN 0 ELSE 1 END DESC, sql_match_score DESC, c.priority_rank DESC, c.id ASC LIMIT ${limit}`
+      const res = await this.database.query(sql, params)
+      return res.values ?? []
     }
 
-    // Drop raw metadata stubs (entity candidates / provenance lines). They are machine bookkeeping,
-    // not canon content, yet they carry a high priority rank and would otherwise crowd the top-k.
-    if (options.excludeMetadataFragments !== false) {
-      sql += ` AND NOT (${METADATA_FRAGMENT_PATTERNS.map(() => 'c.raw_text LIKE ?').join(' OR ')})`
-      params.push(...METADATA_FRAGMENT_PATTERNS)
+    let rows: Record<string, unknown>[]
+    if (useFts) {
+      const ftsMode = shortTerms.length > 0 && this.hasTermIndex ? 'fts_plus_short_terms' : 'fts'
+      rows = await runRecallQuery(ftsMode)
+    } else if (this.hasTermIndex) {
+      const termRows = await runRecallQuery('terms')
+      if (termRows.length >= Math.min(limit, 5)) {
+        rows = termRows
+      } else {
+        const likeRows = await runRecallQuery('like')
+        const byId = new Map<number, Record<string, unknown>>()
+        for (const r of termRows) byId.set(Number(r.id), r)
+        for (const r of likeRows) {
+          const rid = Number(r.id)
+          if (!byId.has(rid)) byId.set(rid, r)
+        }
+        rows = Array.from(byId.values())
+      }
+    } else {
+      rows = await runRecallQuery('like')
     }
-
-    // Cards without a chapter ordinal cannot be proven to sit inside the allowed timeline slice,
-    // so in strict (default) mode they must not slip past the spoiler ceiling. Callers that
-    // intentionally want timeless material (rules, factions) can opt in explicitly.
-    if (options.maxChapter !== undefined && Number.isFinite(options.maxChapter)) {
-      sql += options.includeUnknownChapter
-        ? ' AND (c.chapter_order IS NULL OR c.chapter_order <= ?)'
-        : ' AND c.chapter_order IS NOT NULL AND c.chapter_order <= ?'
-      params.push(options.maxChapter)
-    }
-
-    const limit = Math.max(1, Math.min(options.limit ?? 50, 100))
-    sql += ` ORDER BY CASE WHEN c.priority_rank = 0 THEN 0 ELSE 1 END DESC, sql_match_score DESC, c.priority_rank DESC, c.id ASC LIMIT ${limit}`
-
-    const res = await this.database.query(sql, params)
-    const rows = res.values ?? []
 
     const getTermWeight = (term: string): number => {
       if (hasSpecificTerm && genericHighFreq.has(term)) return 0.35
@@ -919,11 +1139,14 @@ export class MobileRagDatabase {
     const countRes = await this.database.query('SELECT count(*) as cnt FROM session_attachment')
     const count = Number(countRes.values?.[0]?.cnt ?? 0)
     await this.database.executeSet([
+      { statement: 'DELETE FROM session_attachment_term', values: [] },
       { statement: 'DELETE FROM session_attachment_vector', values: [] },
       { statement: 'DELETE FROM session_attachment_chunk', values: [] },
       { statement: 'DELETE FROM session_attachment_parent', values: [] },
       { statement: 'DELETE FROM session_attachment', values: [] },
     ])
+    this.hasTermIndex = false
+    await this.rebuildFtsIndex()
     return count
   }
 

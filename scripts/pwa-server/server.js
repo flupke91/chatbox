@@ -11,6 +11,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const zlib = require('node:zlib')
 
 const ROOT = __dirname
 const PORT = Number(process.env.PORT || 3000)
@@ -51,17 +52,6 @@ function resolveDataDir() {
 let LOG_FILE = ''
 let TOKEN_FILE = ''
 
-function ensureDataDir() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  LOG_FILE = path.join(DATA_DIR, 'errors.jsonl')
-  TOKEN_FILE = path.join(DATA_DIR, 'admin-token.txt')
-  if (!fs.existsSync(TOKEN_FILE)) {
-    const token = process.env.ADMIN_TOKEN || crypto.randomBytes(18).toString('base64url')
-    fs.writeFileSync(TOKEN_FILE, token, { mode: 0o600 })
-    console.log(`[pwa-server] admin token stored in ${TOKEN_FILE}`)
-  }
-}
-
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -79,6 +69,8 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 }
 
+const COMPRESSIBLE_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.webmanifest', '.svg', '.wasm', '.txt'])
+
 function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true })
   LOG_FILE = path.join(DATA_DIR, 'errors.jsonl')
@@ -93,6 +85,25 @@ function ensureDataDir() {
 function adminToken() {
   ensureDataDir()
   return fs.readFileSync(TOKEN_FILE, 'utf8').trim()
+}
+
+function tokensEqual(provided, expected) {
+  if (!provided || !expected) return false
+  const a = Buffer.from(String(provided), 'utf8')
+  const b = Buffer.from(String(expected), 'utf8')
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
+}
+
+function extractAdminToken(req, url) {
+  const auth = req.headers.authorization
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    return auth.slice(7).trim()
+  }
+  const headerToken = req.headers['x-admin-token']
+  if (typeof headerToken === 'string' && headerToken.trim()) {
+    return headerToken.trim()
+  }
+  return url.searchParams.get('token') || ''
 }
 
 function rotateIfNeeded() {
@@ -245,18 +256,39 @@ function handleTelemetry(req, res) {
   })
 }
 
-function serveStatic(req, res) {
-  const urlPath = decodeURIComponent((req.url || '/').split('?')[0])
+function selectEncoding(req, ext) {
+  if (!COMPRESSIBLE_EXTS.has(ext)) return null
+  const accept = String(req.headers['accept-encoding'] || '')
+  if (/\bbr\b/i.test(accept)) return 'br'
+  if (/\bgzip\b/i.test(accept)) return 'gzip'
+  return null
+}
 
-  // Never serve the token or the collected reports.
-  if (urlPath.startsWith('/telemetry') || urlPath === '/admin-token.txt' || urlPath === '/server.js') {
+function serveStatic(req, res) {
+  let urlPath
+  try {
+    urlPath = decodeURIComponent((req.url || '/').split('?')[0])
+  } catch {
+    res.writeHead(400)
+    res.end('bad request')
+    return
+  }
+
+  // Never serve the token, collected reports, server script, or bundle stats.
+  if (
+    urlPath.startsWith('/telemetry') ||
+    urlPath === '/admin-token.txt' ||
+    urlPath === '/server.js' ||
+    urlPath === '/stats.html'
+  ) {
     res.writeHead(404)
     res.end('not found')
     return
   }
 
-  let filePath = path.join(ROOT, urlPath)
-  if (!filePath.startsWith(ROOT)) {
+  const relativePath = urlPath.replace(/^\/+/, '')
+  let filePath = path.resolve(ROOT, relativePath)
+  if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) {
     res.writeHead(403)
     res.end()
     return
@@ -282,12 +314,29 @@ function serveStatic(req, res) {
 
   const ext = path.extname(filePath)
   const immutable = /\/js\/|\/assets\/|\/fonts\//.test(urlPath)
-  res.writeHead(200, {
+  const encoding = stat.size >= 1024 ? selectEncoding(req, ext) : null
+  const headers = {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
     'Service-Worker-Allowed': '/',
-  })
-  fs.createReadStream(filePath).pipe(res)
+    Vary: 'Accept-Encoding',
+  }
+  if (encoding) {
+    headers['Content-Encoding'] = encoding
+  }
+  res.writeHead(200, headers)
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+  const stream = fs.createReadStream(filePath)
+  if (encoding === 'br') {
+    stream.pipe(zlib.createBrotliCompress()).pipe(res)
+  } else if (encoding === 'gzip') {
+    stream.pipe(zlib.createGzip()).pipe(res)
+  } else {
+    stream.pipe(res)
+  }
 }
 
 const server = http.createServer((req, res) => {
@@ -304,10 +353,10 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.pathname === '/admin/errors' || url.pathname === '/admin/errors.json') {
-    const token = url.searchParams.get('token') || ''
+    const token = extractAdminToken(req, url)
     const expected = adminToken()
-    if (!token || token !== expected) {
-      sendJson(res, 401, { error: 'unauthorized', hint: 'append ?token=<admin token>' })
+    if (!tokensEqual(token, expected)) {
+      sendJson(res, 401, { error: 'unauthorized', hint: 'pass Authorization: Bearer <token>, X-Admin-Token, or ?token=<admin token>' })
       return
     }
     const rows = readRecent()

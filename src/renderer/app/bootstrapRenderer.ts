@@ -74,11 +74,17 @@ export async function bootstrapRenderer(application: RendererApplication): Promi
     initRecentDirectoriesStore(),
   ])
 
-  void i18n.changeLanguage(settings.language)
+  if (settings.language && !i18n.hasResourceBundle(settings.language, 'translation')) {
+    await i18n.changeLanguage(settings.language)
+  } else {
+    void i18n.changeLanguage(settings.language)
+  }
   initLoginLicenseStateReconciliation()
 
   if (platform.type === 'desktop') {
     initUpdateListeners()
+  }
+  if (platform.supportsSessionAttachmentRag?.() ?? platform.isDesktopLike) {
     initSessionAttachmentRagMaintenance()
   }
   initSessionPresentationBindings()

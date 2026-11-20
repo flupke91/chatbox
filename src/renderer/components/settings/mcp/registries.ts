@@ -2,7 +2,7 @@
 
 /// <reference types="vite/client" />
 
-import { fromPairs } from 'lodash'
+import fromPairs from 'lodash/fromPairs'
 
 // Use Vite's import.meta.glob to dynamically import all PNG files
 // Vite handles import.meta.glob at build time, even though TypeScript doesn't recognize it with commonjs module setting

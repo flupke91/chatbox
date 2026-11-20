@@ -1,5 +1,5 @@
 import { applyLegacyToolFallback as applySharedLegacyToolFallback } from '@chatbox/core/generation'
-import { uniqueId } from 'lodash'
+import uniqueId from 'lodash/uniqueId'
 import {
   combinedSearchByPromptEngineering,
   constructMessagesWithKnowledgeBaseResults,

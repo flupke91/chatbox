@@ -56,13 +56,14 @@ export class SqlJsDatabase {
   private db: Database | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private saving: Promise<void> = Promise.resolve()
+  private dirty = false
 
   constructor(private persistence: SqlJsPersistence = indexedDbPersistence) {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       // The debounced snapshot can otherwise be lost when the tab is closed right after an
-      // import finishes; flush synchronously-ish on hide/unload.
+      // import finishes; flush only when dirty so background switches stay free.
       const flushOnHide = () => {
-        void this.flush()
+        void this.flush().catch(() => undefined)
       }
       window.addEventListener('pagehide', flushOnHide)
       document.addEventListener('visibilitychange', () => {
@@ -76,12 +77,14 @@ export class SqlJsDatabase {
     const SQL = await loadSqlJs()
     const persisted = await this.persistence.load()
     this.db = persisted && persisted.byteLength > 0 ? new SQL.Database(new Uint8Array(persisted)) : new SQL.Database()
+    this.dirty = false
   }
 
   public async close(): Promise<void> {
-    await this.flush()
+    await this.flush().catch(() => undefined)
     this.db?.close()
     this.db = null
+    this.dirty = false
   }
 
   private requireDb(): Database {
@@ -108,6 +111,7 @@ export class SqlJsDatabase {
     const lastIdRow = db.exec('SELECT last_insert_rowid() AS id')
     const lastId = Number(lastIdRow[0]?.values?.[0]?.[0] ?? 0)
     const changes = db.getRowsModified()
+    this.dirty = true
     this.scheduleSave()
     return { changes: { changes, lastId } }
   }
@@ -117,6 +121,7 @@ export class SqlJsDatabase {
     // exec() accepts multiple ";"-separated statements, which is what the schema bootstrap uses.
     db.exec(statements)
     const changes = db.getRowsModified()
+    this.dirty = true
     this.scheduleSave()
     return { changes: { changes } }
   }
@@ -125,13 +130,24 @@ export class SqlJsDatabase {
     set: Array<{ statement: string; values?: unknown[] }>
   ): Promise<{ changes: { changes: number } }> {
     const db = this.requireDb()
+    if (set.length === 0) return { changes: { changes: 0 } }
+    let lastSql = ''
+    let stmt: ReturnType<Database['prepare']> | null = null
     db.run('BEGIN')
     try {
       for (const item of set) {
-        db.run(item.statement, (item.values ?? []) as never[])
+        if (item.statement !== lastSql) {
+          stmt?.free()
+          stmt = db.prepare(item.statement)
+          lastSql = item.statement
+        }
+        stmt!.run((item.values ?? []) as never[])
       }
+      stmt?.free()
+      stmt = null
       db.run('COMMIT')
     } catch (error) {
+      stmt?.free()
       try {
         db.run('ROLLBACK')
       } catch {
@@ -140,6 +156,7 @@ export class SqlJsDatabase {
       throw error
     }
     const changes = db.getRowsModified()
+    this.dirty = true
     this.scheduleSave()
     return { changes: { changes } }
   }
@@ -149,7 +166,7 @@ export class SqlJsDatabase {
     if (this.saveTimer) clearTimeout(this.saveTimer)
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null
-      void this.flush()
+      void this.flush().catch(() => undefined)
     }, SAVE_DEBOUNCE_MS)
   }
 
@@ -159,12 +176,23 @@ export class SqlJsDatabase {
       this.saveTimer = null
     }
     const db = this.db
-    if (!db) return
+    if (!db || !this.dirty) return
+    this.dirty = false
     const bytes = db.export()
-    this.saving = this.saving.then(async () => {
-      await this.persistence.save(bytes)
-    })
-    await this.saving
+    const nextSave = this.saving
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await this.persistence.save(bytes)
+        } catch (error) {
+          // Restore dirty so a transient failure (e.g. quota recovered later) is retried
+          // instead of permanently discarding pending changes or poisoning future flushes.
+          this.dirty = true
+          throw error
+        }
+      })
+    this.saving = nextSave.catch(() => undefined)
+    await nextSave
   }
 }
 

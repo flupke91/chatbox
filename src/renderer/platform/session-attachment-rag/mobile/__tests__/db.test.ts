@@ -35,6 +35,40 @@ describe('MobileRagDatabase', () => {
     expect(mockDatabase.execute).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS session_attachment_parent'))
     expect(mockDatabase.execute).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS session_attachment_chunk'))
     expect(mockDatabase.execute).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS session_attachment_vector'))
+    expect(mockDatabase.execute).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE IF NOT EXISTS session_attachment_term'))
+  })
+
+  it('skips ALTER TABLE when PRAGMA table_info reports all columns already exist', async () => {
+    const allCols = [
+      'id', 'attachment_id', 'parent_id', 'chunk_order', 'section_path', 'page_start', 'page_end',
+      'raw_text', 'embedded_text', 'token_estimate', 'entities', 'keywords', 'chapter_order',
+      'story_time', 'state_kind', 'valid_from', 'valid_to', 'priority_rank', 'kind', 'metadata', 'created_at',
+    ].map((name) => ({ name }))
+    mockDatabase.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('PRAGMA table_info')) return { values: allCols }
+      if (sql.includes('sqlite_master')) return { values: [{ name: 'session_attachment_chunk_fts' }] }
+      return { values: [] }
+    })
+
+    await ragDb.initialize()
+
+    const alterCalls = mockDatabase.execute.mock.calls.filter(([s]: [string]) => s.includes('ALTER TABLE'))
+    expect(alterCalls).toHaveLength(0)
+  })
+
+  it('runs ALTER TABLE only for missing columns reported by PRAGMA table_info', async () => {
+    mockDatabase.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('PRAGMA table_info')) return { values: [{ name: 'id' }, { name: 'entities' }] }
+      if (sql.includes('sqlite_master')) return { values: [{ name: 'session_attachment_chunk_fts' }] }
+      return { values: [] }
+    })
+
+    await ragDb.initialize()
+
+    const alterCalls = mockDatabase.execute.mock.calls.map(([s]: [string]) => s).filter((s: string) => s.includes('ALTER TABLE'))
+    expect(alterCalls.length).toBe(9)
+    expect(alterCalls.some((s: string) => s.includes('ADD COLUMN entities'))).toBe(false)
+    expect(alterCalls.some((s: string) => s.includes('ADD COLUMN state_kind'))).toBe(true)
   })
 
   it('creates attachment and returns new id', async () => {
@@ -108,20 +142,25 @@ describe('MobileRagDatabase', () => {
   })
 
   it('reads parents with session isolation checking', async () => {
-    mockDatabase.query.mockResolvedValueOnce({ values: [{ name: 'session_attachment_chunk_fts' }] }) // FTS existence probe
-    mockDatabase.query.mockResolvedValueOnce({
-      values: [
-        {
-          id: 1,
-          attachment_id: 42,
-          parent_order: 0,
-          section_path: 'Intro',
-          text: 'Full parent section content',
-          token_estimate: 100,
-          char_count: 400,
-          filename: 'notes.md',
-        },
-      ],
+    mockDatabase.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('sqlite_master')) return { values: [{ name: 'session_attachment_chunk_fts' }] }
+      if (sql.includes('FROM session_attachment_parent p')) {
+        return {
+          values: [
+            {
+              id: 1,
+              attachment_id: 42,
+              parent_order: 0,
+              section_path: 'Intro',
+              text: 'Full parent section content',
+              token_estimate: 100,
+              char_count: 400,
+              filename: 'notes.md',
+            },
+          ],
+        }
+      }
+      return { values: [] }
     })
 
     const parents = await ragDb.readParents([1], [42])
@@ -132,40 +171,50 @@ describe('MobileRagDatabase', () => {
     expect(parents[0].filename).toBe('notes.md')
   })
 
-  it('deletes attachment and all associated records', async () => {
+  it('deletes attachment and all associated records including term and FTS index', async () => {
+    mockDatabase.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('sqlite_master')) return { values: [{ name: 'session_attachment_chunk_fts' }] }
+      return { values: [] }
+    })
     await ragDb.deleteAttachment(42)
     expect(mockDatabase.executeSet).toHaveBeenCalledWith([
+      { statement: 'DELETE FROM session_attachment_term WHERE attachment_id = ?', values: [42] },
       { statement: 'DELETE FROM session_attachment_vector WHERE attachment_id = ?', values: [42] },
       { statement: 'DELETE FROM session_attachment_chunk WHERE attachment_id = ?', values: [42] },
       { statement: 'DELETE FROM session_attachment_parent WHERE attachment_id = ?', values: [42] },
       { statement: 'DELETE FROM session_attachment WHERE id = ?', values: [42] },
     ])
+    expect(mockDatabase.execute).toHaveBeenCalledWith(expect.stringContaining("VALUES('rebuild')"))
   })
 
   it('returns accurate debug snapshot', async () => {
-    mockDatabase.query
-      .mockResolvedValueOnce({ values: [{ name: 'session_attachment_chunk_fts' }] }) // FTS existence probe
-      .mockResolvedValueOnce({ values: [{ cnt: 3 }] }) // attachmentCount
-      .mockResolvedValueOnce({ values: [{ cnt: 12 }] }) // parentCount
-      .mockResolvedValueOnce({ values: [{ cnt: 45 }] }) // chunkCount
-      .mockResolvedValueOnce({ values: [{ pending: 1, indexing: 0, ready: 2, failed: 0 }] }) // statusCounts
-      .mockResolvedValueOnce({
-        values: [
-          {
-            id: 1,
-            session_id: 's1',
-            message_id: 'm1',
-            attachment_storage_key: 'k1',
-            filename: 'f1.txt',
-            mime_type: 'text/plain',
-            file_size: 100,
-            token_estimate: 25,
-            status: 'ready',
-            total_chunks: 10,
-            embedded_chunks: 10,
-          },
-        ],
-      }) // recentAttachments
+    mockDatabase.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('sqlite_master')) return { values: [{ name: 'session_attachment_chunk_fts' }] }
+      if (sql.includes('FROM session_attachment_parent') && sql.includes('count(*)')) return { values: [{ cnt: 12 }] }
+      if (sql.includes('FROM session_attachment_chunk') && sql.includes('count(*)')) return { values: [{ cnt: 45 }] }
+      if (sql.includes('sum(case when status')) return { values: [{ pending: 1, indexing: 0, ready: 2, failed: 0 }] }
+      if (sql.includes('FROM session_attachment') && sql.includes('count(*)')) return { values: [{ cnt: 3 }] }
+      if (sql.includes('ORDER BY id DESC LIMIT 10')) {
+        return {
+          values: [
+            {
+              id: 1,
+              session_id: 's1',
+              message_id: 'm1',
+              attachment_storage_key: 'k1',
+              filename: 'f1.txt',
+              mime_type: 'text/plain',
+              file_size: 100,
+              token_estimate: 25,
+              status: 'ready',
+              total_chunks: 10,
+              embedded_chunks: 10,
+            },
+          ],
+        }
+      }
+      return { values: [] }
+    })
 
     const snapshot = await ragDb.getDebugSnapshot()
     expect(snapshot.attachmentCount).toBe(3)
@@ -234,5 +283,35 @@ describe('MobileRagDatabase', () => {
     const [sql] = mockDatabase.query.mock.calls[0]
     expect(sql).toContain('LOWER(c.raw_text) LIKE ?')
     expect(sql).not.toContain('MATCH')
+  })
+
+  it('unions 2-char inverted term lookup with FTS5 trigram recall when term index is populated', async () => {
+    mockDatabase.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT 1 FROM session_attachment_term LIMIT 1')) return { values: [{ 1: 1 }] }
+      return { values: [] }
+    })
+    await ragDb.initialize()
+    mockDatabase.query.mockClear()
+
+    await ragDb.searchKeywordChunks([1], { keywords: ['方正', '开窍大典'], limit: 10 })
+
+    const [sql, params] = mockDatabase.query.mock.calls[0]
+    expect(sql).toContain('session_attachment_chunk_fts MATCH ?')
+    expect(sql).toContain('session_attachment_term')
+    expect(params).toContain('"开窍大典"')
+    expect(params).toContain('方正')
+  })
+
+  it('pushes phase-bound snapshot [valid_from, valid_to] filtering into SQL when maxChapter is set', async () => {
+    await ragDb.initialize()
+    mockDatabase.query.mockClear()
+
+    await ragDb.searchKeywordChunks([1], { keywords: ['方源'], maxChapter: 300, limit: 10 })
+
+    const [sql, params] = mockDatabase.query.mock.calls[0]
+    expect(sql).toContain("c.state_kind NOT IN ('snapshot', 'item_state', 'relationship')")
+    expect(sql).toContain('c.valid_from <= ?')
+    expect(sql).toContain('c.valid_to >= ?')
+    expect(params.filter((p: unknown) => p === 300).length).toBeGreaterThanOrEqual(3)
   })
 })

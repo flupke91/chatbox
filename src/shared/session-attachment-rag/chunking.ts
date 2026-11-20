@@ -493,7 +493,13 @@ export function pickEvidenceQuote(row: unknown[]): string {
 }
 
 export function chunkStoryKbDocument(content: string): AttachmentChunkingResult {
-  const data = JSON.parse(content)
+  const data = JSON.parse(content) as Record<string, unknown>
+  return chunkStoryKbObject(data)
+}
+
+export function chunkStoryKbObject(rawData: Record<string, unknown>): AttachmentChunkingResult {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = rawData as Record<string, any>
   const configuredSpan = Number((data as { manifest?: { parent_chapter_span?: unknown } }).manifest?.parent_chapter_span)
   const parentChapterSpan =
     Number.isFinite(configuredSpan) && configuredSpan >= 1 ? configuredSpan : DEFAULT_PARENT_CHAPTER_SPAN
@@ -610,6 +616,7 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
   const children: ChildChunk[] = []
 
   let currentParentCards: string[] = []
+  let currentParentChars = 0
   let currentParentOrder = 0
   let currentSection = ''
   /** Chapter window of the parent being filled, if any card carried one. */
@@ -630,6 +637,7 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
     })
     currentParentOrder++
     currentParentCards = []
+    currentParentChars = 0
     currentParentChapterMin = undefined
     currentParentChapterMax = undefined
     lastChildIndexInParent = -1
@@ -734,9 +742,13 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
         currentParentChapterMax !== undefined &&
         Math.max(currentParentChapterMax, chapterOrder) - Math.min(currentParentChapterMin, chapterOrder) >=
           parentChapterSpan
-      if (spansTooFar || currentParentCards.join('\n\n').length + cardRepresentation.length > PARENT_TARGET_CHARS) {
+      if (
+        spansTooFar ||
+        currentParentChars + (currentParentCards.length > 0 ? 2 : 0) + cardRepresentation.length > PARENT_TARGET_CHARS
+      ) {
         flushParent()
       }
+      currentParentChars += (currentParentCards.length > 0 ? 2 : 0) + cardRepresentation.length
       currentParentCards.push(cardRepresentation)
       if (chapterOrder !== undefined) {
         currentParentChapterMin =
@@ -813,9 +825,10 @@ export function chunkStoryKbDocument(content: string): AttachmentChunkingResult 
             const statement = String(ruleObj.statement || '').trim()
             if (!statement) continue
             const ruleText = `[${coreKey}: ${ruleId}] (${category}) ${statement}`
-            if (currentParentCards.join('\n\n').length + ruleText.length > PARENT_TARGET_CHARS) {
+            if (currentParentChars + (currentParentCards.length > 0 ? 2 : 0) + ruleText.length > PARENT_TARGET_CHARS) {
               flushParent()
             }
+            currentParentChars += (currentParentCards.length > 0 ? 2 : 0) + ruleText.length
             currentParentCards.push(ruleText)
             children.push({
               parentOrder: currentParentOrder,

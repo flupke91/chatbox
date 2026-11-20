@@ -266,6 +266,7 @@ type SessionRagConfigCacheEntry = {
 }
 
 const SESSION_RAG_CONFIG_CACHE_TTL_MS = 10 * 60 * 1000
+const SESSION_RAG_CONFIG_FAILURE_CACHE_TTL_MS = 60 * 1000
 const sessionRagConfigCache = new Map<string, SessionRagConfigCacheEntry>()
 
 export async function getSessionRagConfig(params?: { licenseKey?: string }) {
@@ -297,11 +298,11 @@ export async function getSessionRagConfig(params?: { licenseKey?: string }) {
   }
   sessionRagConfigCache.set(cacheKey, entry)
 
-  // Evict on failure so the next caller retries instead of being stuck with a rejected
-  // promise for the entire TTL window.
+  // Negative-cache failures briefly (60s) so unreachable endpoints do not stall consecutive
+  // turns with repeated retry storms, while still allowing timely recovery.
   promise.catch(() => {
     if (sessionRagConfigCache.get(cacheKey) === entry) {
-      sessionRagConfigCache.delete(cacheKey)
+      entry.expiresAt = Date.now() + SESSION_RAG_CONFIG_FAILURE_CACHE_TTL_MS
     }
   })
 

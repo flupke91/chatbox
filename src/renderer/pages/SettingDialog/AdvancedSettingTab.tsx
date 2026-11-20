@@ -11,7 +11,7 @@ import {
   useTheme,
 } from '@mui/material'
 import type { Settings } from '@shared/types'
-import { uniqBy } from 'lodash'
+import uniqBy from 'lodash/uniqBy'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Accordion, AccordionDetails, AccordionSummary } from '@/components/Accordion'

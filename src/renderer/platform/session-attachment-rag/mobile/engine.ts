@@ -513,8 +513,12 @@ export class MobileLocalRagEngine {
       return []
     }
 
-    // 2. Fetch candidate chunk details
-    const chunks = await this.database.listChunksWithDetails(Array.from(candidateChunkIds))
+    // 2. Fetch details only for vector-only hits; keywordHits already carry full chunk rows.
+    const keywordChunkById = new Map(keywordHits.map((h) => [h.id, h]))
+    const vectorOnlyIds = vectorHits.map((h) => h.chunkId).filter((id) => !keywordChunkById.has(id))
+    const vectorOnlyChunks =
+      vectorOnlyIds.length > 0 ? await this.database.listChunksWithDetails(vectorOnlyIds) : []
+    const chunks = [...keywordHits, ...vectorOnlyChunks]
     // A state snapshot is only valid inside its phase. The SQL ceiling already drops
     // future chapters; this also drops expired snapshots so an old "白家寨三转"
     // cannot outrank the current "影宗蛊仙" when the player is past the transition.

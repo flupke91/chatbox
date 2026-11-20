@@ -2,6 +2,7 @@ import type { EmbeddingModel } from 'ai'
 import {
   buildAttachmentChunks,
   buildEmbeddedText,
+  chunkStoryKbObject,
   isStoryKbFormat,
   selectAttachmentChunkingPipeline,
 } from '@shared/session-attachment-rag/chunking'
@@ -162,18 +163,24 @@ export class MobileRagIndexer {
     // from a single line instead of guesswork.
     const timing = { parseMs: 0, chunkMs: 0, insertMs: 0, bytes: content.length }
     const startedAt = Date.now()
+    let parents: Awaited<ReturnType<typeof buildAttachmentChunks>>['parents']
+    let children: Awaited<ReturnType<typeof buildAttachmentChunks>>['children']
     if (isStoryKb) {
       const t0 = Date.now()
-      try {
-        JSON.parse(content)
-      } catch {
-        // chunking below will surface the real error
-      }
+      const parsed = JSON.parse(content) as Record<string, unknown>
       timing.parseMs = Date.now() - t0
+      const chunkStart = Date.now()
+      const chunked = chunkStoryKbObject(parsed)
+      timing.chunkMs = Date.now() - chunkStart
+      parents = chunked.parents
+      children = chunked.children
+    } else {
+      const chunkStart = Date.now()
+      const chunked = await buildAttachmentChunks(content, attachment.filename)
+      timing.chunkMs = Date.now() - chunkStart
+      parents = chunked.parents
+      children = chunked.children
     }
-    const chunkStart = Date.now()
-    const { parents, children } = await buildAttachmentChunks(content, attachment.filename)
-    timing.chunkMs = Date.now() - chunkStart
     if (parents.length === 0 || children.length === 0) {
       throw new Error('Attachment produced no chunks')
     }
@@ -182,6 +189,12 @@ export class MobileRagIndexer {
 
     // Clean previous vectors and replace chunks in DB
     await this.vectorStore.deleteIndex(attachment.id)
+
+    // For large structured Story KBs (>500 cards) or when no embedding provider is configured for a Story KB,
+    // all structured entities, aliases, keywords, chapter orders, and priority ranks are already indexed in SQLite.
+    // Mark ready immediately without blocking mobile for 750+ remote HTTP embedding batches, and omit
+    // redundant embedded_text storage (~18 MB savings across SQLite and bridge serialization).
+    const skipEmbedding = isStoryKb && (!embeddingResolution || children.length > STORY_KB_EMBEDDING_THRESHOLD)
 
     const parentPayload = parents.map((p) => ({
       parentOrder: p.parentOrder,
@@ -197,11 +210,13 @@ export class MobileRagIndexer {
       chunkOrder: c.chunkOrder,
       sectionPath: c.sectionPath,
       rawText: c.rawText,
-      embeddedText: buildEmbeddedText({
-        filename: attachment.filename,
-        sectionPath: c.sectionPath,
-        text: c.rawText,
-      }),
+      embeddedText: skipEmbedding
+        ? ''
+        : buildEmbeddedText({
+            filename: attachment.filename,
+            sectionPath: c.sectionPath,
+            text: c.rawText,
+          }),
       tokenEstimate: c.tokenEstimate,
       entities: c.entities,
       keywords: c.keywords,
@@ -227,10 +242,7 @@ export class MobileRagIndexer {
 
     if (this.isCanceled(attachment.id)) return
 
-    // For large structured Story KBs (>500 cards) or when no embedding provider is configured for a Story KB,
-    // all structured entities, aliases, keywords, chapter orders, and priority ranks are already indexed in SQLite.
-    // Mark ready immediately without blocking mobile for 750+ remote HTTP embedding batches.
-    if (isStoryKb && (!embeddingResolution || children.length > STORY_KB_EMBEDDING_THRESHOLD)) {
+    if (skipEmbedding) {
       await this.database.updateAttachmentProgress(attachment.id, {
         indexingStage: 'finalizing',
         totalChunks: children.length,

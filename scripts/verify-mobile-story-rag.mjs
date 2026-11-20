@@ -31,6 +31,25 @@ registerHooks({
         shortCircuit: true,
       }
     }
+    // Renderer-only modules pulled in by mobile/engine.ts; the bench runs headless.
+    if (specifier === '@/platform') {
+      return {
+        url: 'data:text/javascript,export default { type: "web", getConfig: async () => ({}) };',
+        shortCircuit: true,
+      }
+    }
+    if (specifier === '@/utils/telemetry') {
+      return {
+        url: 'data:text/javascript,export function reportTelemetry() {};',
+        shortCircuit: true,
+      }
+    }
+    if (specifier === '@/adapters' || specifier === '@/storage' || specifier === '@/stores/settingsStore') {
+      return {
+        url: 'data:text/javascript,export function createModel() { throw new Error("createModel unavailable in bench") }; export default { getBlob: async () => null }; export const settingsStore = { getState: () => ({}) };',
+        shortCircuit: true,
+      }
+    }
     if (specifier.startsWith('./') || specifier.startsWith('../')) {
       if (context.parentURL?.startsWith('file://')) {
         const parentDir = path.dirname(new URL(context.parentURL).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
@@ -105,7 +124,9 @@ const mockConnection = {
   },
 }
 
-const kbPath = path.join(chatboxRoot, 'patch/goal/gur-kb(2).json')
+const kbPath = process.env.KB_PATH
+  ? path.resolve(chatboxRoot, process.env.KB_PATH)
+  : path.join(chatboxRoot, 'patch/goal/gur-kb(2).json')
 const rawKb = fs.readFileSync(kbPath, 'utf-8')
 
 console.log('1. Testing isStoryKbFormat:', isStoryKbFormat(rawKb))
@@ -375,4 +396,153 @@ for (const sc of scenarios) {
 console.log(`\n=== SUMMARY: ${passed}/${scenarios.length} Scenarios Passed ===`)
 if (passed < scenarios.length) {
   process.exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// 精简版专项探针（KB_PROBES=1 时运行）：只针对 clean-story-kb-chatbox 的产出。
+// ---------------------------------------------------------------------------
+if (process.env.KB_PROBES === '1' || process.env.KB_PROBES === '2') {
+  const probes = [
+    {
+      id: 'P01',
+      name: '炼蛊四大基本操作全文恢复',
+      query: '炼蛊四大基本操作 升炼 合炼 平炼 逆炼',
+      currentChapter: 50,
+      activeEntities: [],
+      assertText: (top1) => top1.includes('不应混淆'),
+      label: 'Top1 含「不应混淆」',
+    },
+    {
+      id: 'P02',
+      name: '八大兽影全文恢复 + 章号保留',
+      query: '八大兽影',
+      currentChapter: 400,
+      activeEntities: ['八大兽影'],
+      assertText: (top1) =>
+        ['白象元力蛊', '黑蟒缠力蛊', '棕熊本力蛊', '石龟负力蛊', '青牛痛力蛊', '鳄力蛊', '马力蛊', '猪力蛊'].every((beast) =>
+          top1.includes(beast)
+        ) && top1.includes('CH_368'),
+      label: 'Top1 含八兽名 + CH_368',
+    },
+    {
+      id: 'P03',
+      name: '方源 Ch15 状态无后期泄漏与重复尾巴',
+      query: '方源的修为境界和当前身份是什么？',
+      currentChapter: 15,
+      activeEntities: ['方源'],
+      assertResults: (results) => {
+        const lateTerms = ['至尊仙胎', '仙僵', '大爱仙尊', '六转', '九转']
+        const isBad = (text) => text.includes('；说明 Identity:') || lateTerms.some((term) => text.includes(term))
+
+        // 检索侧：返回的 character_states 快照必须干净
+        const states = results.filter((r) => (r.sectionPath ?? '').startsWith('character_states'))
+        const badReturned = states.filter((r) => isBad(r.text))
+
+        // 静态侧：KB 中在 Ch15 可见的方源状态卡必须干净（避免检索侧为空时断言空转）
+        const data = JSON.parse(rawKb)
+        const chapterMap = new Map(data.chapter_catalog.map((row) => [Number(row[0]), Number(row[2])]))
+        let visible = 0
+        let badStatic = 0
+        for (const card of data.character_states ?? []) {
+          if (card.name !== '方源') continue
+          const chs = (card.ch ?? []).map((ch) => chapterMap.get(Number(ch))).filter((n) => Number.isFinite(n))
+          if (chs.length > 0 && Math.min(...chs) > 15) continue
+          if (card.valid_from !== undefined && card.valid_from > 15) continue
+          if (card.valid_to !== undefined && card.valid_to < 15) continue
+          visible++
+          if (isBad(String(card.card ?? ''))) badStatic++
+        }
+        return {
+          ok: badReturned.length === 0 && badStatic === 0 && visible > 0,
+          detail: `character_states=${states.length} badReturned=${badReturned.length} visibleAtCh15=${visible} badStatic=${badStatic}`,
+        }
+      },
+      label: 'character_states 无后期修为 / 无重复尾巴',
+    },
+  ]
+
+  const phase2Probes = [
+    {
+      id: 'P04',
+      name: '星号词还原可搜（狗屎运仙蛊）',
+      query: '狗屎运仙蛊 巨阳仙尊本命蛊',
+      currentChapter: 1300,
+      activeEntities: [],
+      assertResults: (results) => {
+        const hit = results.filter((r) => r.text.includes('狗屎运仙蛊'))
+        const star = results.filter((r) => r.text.includes('****'))
+        return { ok: hit.length > 0 && star.length === 0, detail: `命中狗屎运仙蛊=${hit.length} 残留****=${star.length}` }
+      },
+      label: 'Top 结果（任一）含「狗屎运仙蛊」且无 ****',
+    },
+    {
+      id: 'P05',
+      name: '星号词还原可搜（五行大法师）',
+      query: '五行大法师 劫运坛 阵道',
+      currentChapter: 2250,
+      activeEntities: [],
+      assertText: (top1) => top1.includes('五行大法师') && !top1.includes('五行**师') && !top1.includes('****'),
+      label: 'Top1 含「五行大法师」且无星号',
+    },
+    {
+      id: 'P06',
+      name: '截断人物卡修复（马尊）',
+      query: '马尊 马英杰 驭兽大师 爱马成痴',
+      currentChapter: 500,
+      activeEntities: ['马尊'],
+      assertText: (top1) => top1.includes('马尊') && !top1.includes('…') && top1.length >= 40,
+      label: 'Top1 为完整中文描述且无 …',
+    },
+    {
+      id: 'P07',
+      name: '空白章补齐（Ch28 / Ch1455）',
+      query: '方源 学堂 勒索 元石 宝黄天 年蛊 价格战',
+      currentChapter: 1455,
+      activeEntities: [],
+      assertResults: (results) => {
+        const need = ['方源堵门勒索同窗元石', '方源年蛊价格战震动宝黄天']
+        const found = need.filter((name) =>
+          results.some((r) => (r.sectionPath ?? '') === `events:${name}` && r.text.includes('【原文印证】'))
+        )
+        return { ok: found.length === need.length, detail: `命中新建卡=${found.length}/${need.length} [${found.join(',')}]` }
+      },
+      label: '新建卡命中且带本章【原文印证】',
+    },
+  ]
+
+  const activeProbes = process.env.KB_PROBES === '2' ? [...probes, ...phase2Probes] : probes
+  let probesPassed = 0
+  for (const probe of activeProbes) {
+    const results = await engine.query({
+      attachmentIds: [attachment.id],
+      query: probe.query,
+      plan: {
+        recallTopK: 35,
+        finalTopK: 6,
+        storyFilter: { currentChapter: probe.currentChapter, activeEntities: probe.activeEntities },
+      },
+    })
+    const top1 = results[0]?.text ?? ''
+    let ok
+    let detail
+    if (probe.assertResults) {
+      const verdict = probe.assertResults(results)
+      ok = verdict.ok
+      detail = verdict.detail
+    } else {
+      ok = probe.assertText(top1)
+      detail = `Top1=${results[0]?.sectionPath ?? 'NONE'} (score=${results[0]?.score?.toFixed(3) ?? 0})`
+    }
+    if (ok) probesPassed++
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${probe.id} ${probe.name} — ${probe.label} ${ok ? '✓' : '✗'} (${detail})`)
+    console.log(`   Top1 text: ${top1.replace(/\n/g, ' ').slice(0, 220)}`)
+    if (!ok) {
+      console.log('   All results:', results.map((r) => `${r.sectionPath}: ${r.text.slice(0, 100)}`))
+    }
+  }
+
+  console.log(`\n=== PROBES: ${probesPassed}/${activeProbes.length} Passed ===`)
+  if (probesPassed < activeProbes.length) {
+    process.exit(1)
+  }
 }

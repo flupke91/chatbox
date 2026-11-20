@@ -118,9 +118,22 @@ describe('Mobile Hybrid Story RAG Regression Tests', () => {
         }
         if (sql.includes('FROM session_attachment_chunk c')) {
           let rows = [...chunksTable.values()]
-          if (sql.includes('AND (c.chapter_order IS NULL OR c.chapter_order <=')) {
-            const maxCh = params[params.length - 1]
+          const maxCh =
+            sql.includes('chapter_order <= ?') && typeof params[params.length - 1] === 'number'
+              ? Number(params[params.length - 1])
+              : undefined
+          if (maxCh !== undefined) {
             rows = rows.filter((r) => r.chapter_order === null || r.chapter_order === undefined || r.chapter_order <= maxCh)
+            if (sql.includes('valid_from <= ?')) {
+              rows = rows.filter((r) => {
+                if (r.state_kind !== 'snapshot' && r.state_kind !== 'item_state' && r.state_kind !== 'relationship') {
+                  return true
+                }
+                if (r.valid_from !== null && r.valid_from !== undefined && r.valid_from > maxCh) return false
+                if (r.valid_to !== null && r.valid_to !== undefined && r.valid_to < maxCh) return false
+                return true
+              })
+            }
           }
           if (sql.includes('LIKE')) {
             const likeTerms = params
@@ -132,6 +145,10 @@ describe('Mobile Hybrid Story RAG Regression Tests', () => {
                 return likeTerms.some((t: string) => text.includes(t))
               })
             }
+          }
+          const limitMatch = sql.match(/LIMIT\s+(\d+)\s*$/i)
+          if (limitMatch) {
+            rows = rows.slice(0, Number(limitMatch[1]))
           }
           return {
             values: rows.map((c) => {
@@ -485,6 +502,71 @@ describe('Mobile Hybrid Story RAG Regression Tests', () => {
       expect(traces.length).toBe(1)
       expect(traces[0].vectorHitCount).toBe(0)
       expect(traces[0].keywordHitCount).toBeGreaterThan(0)
+    })
+
+    it('6. Expired Snapshots Never Starve Active Snapshot Before SQL LIMIT', async () => {
+      chunksTable.clear()
+      vectorsTable.clear()
+
+      for (let i = 1; i <= 40; i++) {
+        parentsTable.set(100 + i, { id: 100 + i, attachmentId, text: `旧阶段快照 ${i}` })
+        chunksTable.set(100 + i, {
+          id: 100 + i,
+          attachment_id: attachmentId,
+          parent_id: 100 + i,
+          chunk_order: i,
+          sectionPath: `character_states:方源旧阶段${i}`,
+          raw_text: `方源旧阶段${i}：古月山寨前期一转修为状态快照。`,
+          entities: JSON.stringify(['方源']),
+          keywords: JSON.stringify(['修为', '状态']),
+          chapter_order: i,
+          state_kind: 'snapshot',
+          valid_from: 1,
+          valid_to: 100,
+          priority_rank: 5,
+          kind: 'character_state',
+        })
+      }
+
+      parentsTable.set(200, { id: 200, attachmentId, text: '当前三转巅峰状态' })
+      chunksTable.set(200, {
+        id: 200,
+        attachment_id: attachmentId,
+        parent_id: 200,
+        chunk_order: 200,
+        sectionPath: 'character_states:方源三王山阶段',
+        raw_text: '方源当前阶段：三转巅峰，炼道初成，身处三王福地。',
+        entities: JSON.stringify(['方源']),
+        keywords: JSON.stringify(['修为', '三转巅峰', '三王福地']),
+        chapter_order: 220,
+        state_kind: 'snapshot',
+        valid_from: 201,
+        valid_to: 400,
+        priority_rank: 3,
+        kind: 'character_state',
+      })
+
+      const noEmbedEngine = new MobileLocalRagEngine({
+        database,
+        vectorStore,
+        resolveEmbeddingProvider: vi.fn().mockRejectedValue(new Error('No embedding model')),
+      })
+
+      const results = await noEmbedEngine.query({
+        attachmentIds: [attachmentId],
+        query: '方源当前修为状态',
+        plan: {
+          recallTopK: 5,
+          finalTopK: 5,
+          storyFilter: {
+            currentChapter: 250,
+            activeEntities: ['方源'],
+          },
+        },
+      })
+
+      expect(results).toHaveLength(1)
+      expect(results[0].text).toContain('三转巅峰')
     })
   })
 

@@ -8,9 +8,11 @@
  *  - Runtime caching: keeps the shell, hashed bundles and the sql.js wasm available offline.
  *    The knowledge-base SQLite file lives in IndexedDB and never passes through here.
  */
-const CACHE = 'chatbox-rag-v2'
+const CACHE = 'chatbox-rag-v3'
 const SHELL = '/index.html'
 const PRECACHE = ['/', SHELL, '/manifest.webmanifest', '/logo192.png', '/logo512.png']
+const STATIC_ASSET_PREFIXES = ['/js/', '/assets/', '/styles/', '/fonts/', '/images/']
+const EXACT_STATIC_PATHS = new Set(['/logo192.png', '/logo512.png', '/favicon.ico', '/manifest.webmanifest'])
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -56,12 +58,17 @@ self.addEventListener('fetch', (event) => {
   const request = event.request
   if (request.method !== 'GET') return
   const url = new URL(request.url)
-  // Only same-origin app assets; model API calls must never be cached or intercepted.
+  // Only same-origin app assets; API/admin routes, the SW script, and model calls never use cache.
   if (url.origin !== self.location.origin) return
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/admin/') || url.pathname === '/sw.js') {
+    return
+  }
 
   if (request.mode === 'navigate') {
     event.respondWith(networkFirstNavigation(request))
     return
   }
-  event.respondWith(cacheFirstAsset(request))
+  if (STATIC_ASSET_PREFIXES.some((prefix) => url.pathname.startsWith(prefix)) || EXACT_STATIC_PATHS.has(url.pathname)) {
+    event.respondWith(cacheFirstAsset(request))
+  }
 })

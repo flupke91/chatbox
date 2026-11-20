@@ -1,6 +1,6 @@
 import { buildSwitchForkToPatch, findMessageLocation, forkTailStartIndex } from '@shared/session/message-forks'
 import type { Message, Session, SessionMeta, SessionMetaRecord } from '@shared/types'
-import { mapValues } from 'lodash'
+import mapValues from 'lodash/mapValues'
 import { finalizeStaleGeneratingMessage, isStaleGeneratingMessage, migrateMessage } from '../../shared/utils/message'
 
 interface MessageLoadResult {

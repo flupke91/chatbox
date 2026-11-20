@@ -67,15 +67,24 @@ function formatParents(output: unknown): string {
 export async function getToolSet(attachmentIds: number[]) {
   const controller = platform.getSessionAttachmentRagController()
   const attachments = await controller.getAttachments(attachmentIds)
-  const sessionRagConfig = await remote
-    .getSessionRagConfig({ licenseKey: settingActions.getLicenseKey() || undefined })
-    .catch(() => undefined)
-  const remoteRerankModel = sessionRagConfig?.capabilities?.session_attachment_rerank
-    ? sessionRagConfig?.models?.rerank
-    : undefined
   const defaultRerankModel = settingsStore.getState().defaultRerankModel
   const defaultRerankModelString = defaultRerankModel
     ? `${defaultRerankModel.provider}:${defaultRerankModel.model}`
+    : undefined
+  const licenseKey = settingActions.getLicenseKey() || undefined
+  // Mobile and web use the local SQLite Story-KB engine and ignore remote rerank; skipping
+  // the remote config lookup when no local license or rerank model applies avoids 4 failed
+  // HTTP retries before every user turn when offline or unconfigured.
+  const shouldFetchRemoteConfig =
+    !defaultRerankModelString &&
+    Boolean(licenseKey) &&
+    platform.type !== 'mobile' &&
+    platform.type !== 'web'
+  const sessionRagConfig = shouldFetchRemoteConfig
+    ? await remote.getSessionRagConfig({ licenseKey }).catch(() => undefined)
+    : undefined
+  const remoteRerankModel = sessionRagConfig?.capabilities?.session_attachment_rerank
+    ? sessionRagConfig?.models?.rerank
     : undefined
   const rerankModel = defaultRerankModelString || remoteRerankModel
   const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready')

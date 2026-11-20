@@ -1,4 +1,5 @@
-import { uniq, uniqBy } from 'lodash'
+import uniq from 'lodash/uniq'
+import uniqBy from 'lodash/uniqBy'
 import { v4 as uuidv4 } from 'uuid'
 import { SystemProviders } from '../defaults'
 import { ModelProviderEnum, ModelProviderType, type Settings } from '../types'

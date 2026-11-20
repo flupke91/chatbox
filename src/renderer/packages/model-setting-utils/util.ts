@@ -1,6 +1,7 @@
 import { getSystemProviders } from '@shared/providers'
 import type { ProviderModelInfo } from '@shared/types'
-import { identity, omitBy } from 'lodash'
+import identity from 'lodash/identity'
+import omitBy from 'lodash/omitBy'
 import { settingsStore } from '@/stores/settingsStore'
 
 function updateModelInfo(localModel: ProviderModelInfo, newModelInfo: ProviderModelInfo) {

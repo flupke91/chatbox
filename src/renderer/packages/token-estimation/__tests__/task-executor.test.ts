@@ -15,11 +15,15 @@ vi.mock('@/app/renderer-application', () => ({
   rendererApplication: { sessionQueryBridge: { getSession: getSessionMock } },
 }))
 
-vi.mock('@/storage', () => ({
-  default: {
-    getBlob: vi.fn(),
-  },
-}))
+vi.mock('@/storage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/storage')>()
+  return {
+    ...actual,
+    default: {
+      getBlob: vi.fn(),
+    },
+  }
+})
 
 vi.mock('../draft-tokenizer-worker-client', () => ({
   tokenizeDraftOffMainThread: tokenizeDraftMock,

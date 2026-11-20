@@ -1,5 +1,5 @@
 import type { Message } from '@shared/types'
-import { last } from 'lodash'
+import last from 'lodash/last'
 import * as promptFormat from '@/packages/prompts'
 import platform from '@/platform'
 import * as settingActions from '@/stores/settingActions'

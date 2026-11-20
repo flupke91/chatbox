@@ -1,7 +1,7 @@
 import type { JSONValue } from '@ai-sdk/provider'
 import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import type { FilePart, ImagePart, ModelMessage, TextPart, ToolCallPart } from 'ai'
-import { compact } from 'lodash'
+import compact from 'lodash/compact'
 import { pickPersistableProviderMetadata } from '../models/provider-part-metadata'
 import { DEFAULT_TOOL_RESULT_IMAGE_INLINE_LIMIT, getToolResultImageReference } from '../tool-result-image'
 import {

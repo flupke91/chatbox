@@ -134,7 +134,13 @@ export function initSessionAttachmentRagMaintenance() {
 
   maintenanceStarted = true
 
-  void runSessionAttachmentRagMaintenancePass()
+  if (platform.type === 'desktop') {
+    void runSessionAttachmentRagMaintenancePass()
+  } else {
+    setTimeout(() => {
+      void runSessionAttachmentRagMaintenancePass()
+    }, 8000)
+  }
   for (const task of maintenanceTasks) {
     setInterval(() => {
       void runMaintenanceTask(task)

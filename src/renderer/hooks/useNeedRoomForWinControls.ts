@@ -1,5 +1,5 @@
 import { atom, useAtomValue } from 'jotai'
-import { debounce } from 'lodash'
+import debounce from 'lodash/debounce'
 import platform from '@/platform'
 
 export const isFullscreenAtom = atom(false)

@@ -1,5 +1,5 @@
 import type { MessagePicture } from '@shared/types'
-import { concat } from 'lodash'
+import concat from 'lodash/concat'
 import type PhotoSwipe from 'photoswipe'
 import type { UIElementData } from 'photoswipe'
 import { type ReactNode, useMemo } from 'react'

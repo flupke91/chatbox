@@ -7,7 +7,7 @@ import {
 } from '@chatbox/core/utils/chat-export'
 import type { Message, Session } from '@shared/types'
 import { MantineProvider } from '@mantine/core'
-import { escape as escapeHtml } from 'lodash'
+import escapeHtml from 'lodash/escape'
 import ReactDOMServer from 'react-dom/server'
 import Markdown, { BlockCodeCollapsedStateProvider } from '@/components/Markdown'
 import * as base64 from '@/packages/base64'

@@ -1,6 +1,6 @@
 import { cachified } from '@epic-web/cachified'
 import type { SearchResultItem } from '@shared/types'
-import { truncate } from 'lodash'
+import truncate from 'lodash/truncate'
 import platform from '@/platform'
 import { getExtensionSettings, getLanguage, getLicenseKey } from '@/stores/settingActions'
 import { ChatboxAIAPIError } from '../../../shared/models/errors'

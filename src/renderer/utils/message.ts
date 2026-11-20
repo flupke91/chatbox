@@ -1,4 +1,6 @@
-import { assign, cloneDeep, omit } from 'lodash'
+import assign from 'lodash/assign'
+import cloneDeep from 'lodash/cloneDeep'
+import omit from 'lodash/omit'
 import type { Message, MessageContentParts, MessagePicture, SearchResultItem } from 'src/shared/types'
 import { countWord } from '@/packages/word-count'
 

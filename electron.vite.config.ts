@@ -177,17 +177,22 @@ export default defineConfig(({ mode }) => {
   const requestedTarget = process.env.CHATBOX_ELECTRON_VITE_TARGET
   const rendererDevServer = getRendererDevServerConfig(process.env)
 
+  const isAnalyze = process.env.ANALYZE === '1'
+  const productionSourcemap = isProduction ? (process.env.SENTRY_AUTH_TOKEN ? 'hidden' : false) : true
+
   const config: ElectronViteConfig = {
     main: {
       plugins: [
         ...(isProduction
-          ? [
-              visualizer({
-                filename: 'release/app/dist/main/stats.html',
-                open: false,
-                title: 'Main Process Dependency Analysis',
-              }),
-            ]
+          ? isAnalyze
+            ? [
+                visualizer({
+                  filename: 'build-stats/main-stats.html',
+                  open: false,
+                  title: 'Main Process Dependency Analysis',
+                }),
+              ]
+            : []
           : [externalizeDepsPlugin()]),
         process.env.SENTRY_AUTH_TOKEN
           ? sentryVitePlugin({
@@ -211,7 +216,7 @@ export default defineConfig(({ mode }) => {
         lib: {
           entry: resolve(__dirname, 'src/main/main.ts'),
         },
-        sourcemap: isProduction ? 'hidden' : true,
+        sourcemap: productionSourcemap,
         minify: isProduction,
         rollupOptions: {
           external: Object.keys(packageJson.dependencies || {}),
@@ -230,7 +235,7 @@ export default defineConfig(({ mode }) => {
       },
       define: {
         'process.type': '"browser"',
-        'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
+        'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || (isProduction ? 'production' : 'development')),
         'process.env.CHATBOX_BUILD_TARGET': JSON.stringify(process.env.CHATBOX_BUILD_TARGET || 'unknown'),
         'process.env.CHATBOX_BUILD_PLATFORM': JSON.stringify(process.env.CHATBOX_BUILD_PLATFORM || 'unknown'),
         'process.env.CHATBOX_BUILD_CHANNEL': JSON.stringify(process.env.CHATBOX_BUILD_CHANNEL || 'unknown'),
@@ -243,18 +248,20 @@ export default defineConfig(({ mode }) => {
     },
     preload: {
       plugins: [
-        visualizer({
-          filename: 'release/app/dist/preload/stats.html',
-          open: false,
-          title: 'Preload Process Dependency Analysis',
-        }),
-      ],
+        isAnalyze
+          ? visualizer({
+              filename: 'build-stats/preload-stats.html',
+              open: false,
+              title: 'Preload Process Dependency Analysis',
+            })
+          : undefined,
+      ].filter(Boolean),
       build: {
         outDir: isProduction ? 'release/app/dist/preload' : undefined,
         lib: {
           entry: resolve(__dirname, 'src/preload/index.ts'),
         },
-        sourcemap: isProduction ? 'hidden' : true,
+        sourcemap: productionSourcemap,
         minify: isProduction,
       },
       resolve: {
@@ -284,13 +291,15 @@ export default defineConfig(({ mode }) => {
         injectViewportContent(isDesktop),
         isWeb ? injectBaseTag() : undefined,
         injectReleaseDate(),
-        isWeb ? stripThirdPartyAnalytics() : undefined,
+        isWeb || isMobile ? stripThirdPartyAnalytics() : undefined,
         isWeb ? replacePlausibleDomain() : undefined,
-        visualizer({
-          filename: 'release/app/dist/renderer/stats.html',
-          open: false,
-          title: 'Renderer Process Dependency Analysis',
-        }),
+        isAnalyze
+          ? visualizer({
+              filename: 'build-stats/renderer-stats.html',
+              open: false,
+              title: 'Renderer Process Dependency Analysis',
+            })
+          : undefined,
         process.env.SENTRY_AUTH_TOKEN
           ? sentryVitePlugin({
               authToken: process.env.SENTRY_AUTH_TOKEN,
@@ -311,7 +320,7 @@ export default defineConfig(({ mode }) => {
       build: {
         outDir: isProduction ? 'release/app/dist/renderer' : undefined,
         target: 'es2020', // Avoid static initialization blocks for browser compatibility
-        sourcemap: isProduction ? 'hidden' : true,
+        sourcemap: productionSourcemap,
         minify: isProduction ? 'esbuild' : false, // Use esbuild for faster, less memory-intensive minification
         rollupOptions: {
           output: {
@@ -368,7 +377,7 @@ export default defineConfig(({ mode }) => {
       },
       define: {
         'process.type': '"renderer"',
-        'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
+        'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || (isProduction ? 'production' : 'development')),
         'process.env.CHATBOX_BUILD_TARGET': JSON.stringify(process.env.CHATBOX_BUILD_TARGET || 'unknown'),
         'process.env.CHATBOX_BUILD_PLATFORM': JSON.stringify(process.env.CHATBOX_BUILD_PLATFORM || 'unknown'),
         'process.env.CHATBOX_BUILD_CHANNEL': JSON.stringify(process.env.CHATBOX_BUILD_CHANNEL || 'unknown'),

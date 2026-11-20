@@ -10,7 +10,7 @@ import {
   type SessionMeta,
 } from '@shared/types'
 import { getDefaultStore } from 'jotai'
-import { omit } from 'lodash'
+import omit from 'lodash/omit'
 import { rendererApplication } from '@/app/renderer-application'
 import platform from '@/platform'
 import { navigateToDynamicPath, router } from '@/router'

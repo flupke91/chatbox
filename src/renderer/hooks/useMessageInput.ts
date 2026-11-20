@@ -1,5 +1,5 @@
 import { useAtomValue } from 'jotai'
-import { debounce } from 'lodash'
+import debounce from 'lodash/debounce'
 import { type Dispatch, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { currentSessionIdAtom } from '@/stores/atoms/sessionAtoms'
 
